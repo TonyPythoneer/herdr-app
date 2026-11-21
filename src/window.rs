@@ -3280,8 +3280,13 @@ impl AppWindow {
             }
             "browser.open" => {
                 let Some(focus) = Self::focus(a) else { return self.fail("browser.open focus is true or false") };
+                let requested_engine = match a.get("engine") {
+                    None | Some(Value::Null) => None,
+                    Some(Value::String(engine)) => Some(engine.as_str()),
+                    Some(_) => return self.fail("browser.open engine must be a string"),
+                };
                 let engine = match crate::browser_backend::resolve_new_tab(
-                    Self::arg(a, "engine"), crate::browser_backend::Availability::current(),
+                    requested_engine, crate::browser_backend::Availability::current(),
                 ) {
                     Ok(engine) => engine,
                     Err(error) => return self.fail(error),
