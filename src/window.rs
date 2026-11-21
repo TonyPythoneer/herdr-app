@@ -423,6 +423,13 @@ pub struct AppWindow {
     model: Model,
     /// Terminal views by block id (panes and chrome terminal blocks).
     terms: HashMap<String, Term>,
+    /// Native macOS WKWebViews, keyed by existing Herdr pane id (no new tab model).
+    #[cfg(target_os = "macos")]
+    browser_views: HashMap<String, Entity<gpui_wry::WebView>>,
+    #[cfg(target_os = "macos")]
+    browser_urls: HashMap<String, String>,
+    #[cfg(target_os = "macos")]
+    browser_errors: HashMap<String, String>,
     /// Mod copies by slot (block id, `<stack>#header`, or `overlay:<id>`).
     copies: HashMap<String, Copy>,
     overlays: Vec<Overlay>,
@@ -552,6 +559,12 @@ impl AppWindow {
             float_leave: HashMap::new(),
             model: Model::default(),
             terms: HashMap::new(),
+            #[cfg(target_os = "macos")]
+            browser_views: HashMap::new(),
+            #[cfg(target_os = "macos")]
+            browser_urls: HashMap::new(),
+            #[cfg(target_os = "macos")]
+            browser_errors: HashMap::new(),
             copies: HashMap::new(),
             overlays: Vec::new(),
             toast_scroll: ScrollHandle::new(),
@@ -1547,6 +1560,8 @@ impl AppWindow {
         self.enroll_link_handlers();
         self.refresh_link_handlers();
         self.model.order_spaces();
+        #[cfg(target_os = "macos")]
+        self.sync_browser_views(window, cx);
         let (model, live) = (&self.model, &self.live);
         self.swapped.retain(|p, a| model.address_of(p).is_some() && live.contains_key(a));
         let (mut terms, mods_visible) = self.visible();
@@ -1618,12 +1633,16 @@ impl AppWindow {
         // A mod copy lives while its slot is in the layout, hidden or not (an
         // inactive stack child, a hidden column, a pane in another tab), so it
         // keeps its place; only shown slots start a copy. Gone or changed: dropped.
-        let owned = self.owned_mods();
+        let mut owned = self.owned_mods();
+        owned.retain(|_, inst| !crate::browser::is_browser(&inst.name));
         let gone: Vec<_> = self.copies.iter().filter(|(slot, copy)| owned.get(*slot).is_none_or(|inst| *inst != copy.inst)).map(|(slot, _)| slot.clone()).collect();
         for slot in gone {
             self.remove_copy(&slot, window, cx);
         }
-        let want: HashMap<String, Instance> = mods_visible.into_iter().collect();
+        let want: HashMap<String, Instance> = mods_visible
+            .into_iter()
+            .filter(|(_, inst)| !crate::browser::is_browser(&inst.name))
+            .collect();
         for (slot, inst) in want {
             if !self.copies.contains_key(&slot) {
                 let copy = self.load(inst, window, cx);
@@ -2766,7 +2785,7 @@ impl AppWindow {
         if self.model.space(&space).is_none() {
             return Err(format!("no space {space:?}"));
         }
-        if self.view_mod(&m).is_none() {
+        if !crate::browser::is_browser(&m) && self.view_mod(&m).is_none() {
             return Err(format!("no mod {m:?} in mods/"));
         }
         let machine = self.machine_of(&space);
@@ -3255,6 +3274,67 @@ impl AppWindow {
                     None => self.new_tab(Self::owned(a, "space"), name, Self::owned(a, "folder"), Self::argv(a), Self::arg(a, "task"), focus, window),
                 };
                 self.answer(r);
+            }
+            "browser.open" => {
+                let Some(focus) = Self::focus(a) else { return self.fail("browser.open focus is true or false") };
+                let input = Self::arg(a, "url").unwrap_or("https://example.com");
+                let url = match crate::browser::normalize_url(input) {
+                    Ok(url) => url,
+                    Err(error) => return self.fail(error),
+                };
+                self.answer(self.new_mod_tab(Self::owned(a, "space"), Self::arg(a, "name").unwrap_or("Browser"),
+                    crate::browser::MOD_NAME.to_owned(), json!({"url": url}), focus));
+            }
+            "browser.navigate" => {
+                let Some(input) = Self::arg(a, "url") else { return self.fail("browser.navigate needs url") };
+                let url = match crate::browser::normalize_url(input) {
+                    Ok(url) => url,
+                    Err(error) => return self.fail(error),
+                };
+                let Some(pane) = self.browser_pane(Self::arg(a, "pane")) else { return self.fail("no browser pane") };
+                let Some(tab_id) = self.model.tab_of(&pane).map(|t| t.id.clone()) else { return self.fail("browser pane not found") };
+                let Some(tab) = self.model.tab_mut(&tab_id) else { return self.fail("browser tab not found") };
+                let Some(n) = tab.root.find_mut(&pane) else { return self.fail("browser pane not found") };
+                let Some(Content::Mod { props, .. }) = (match &mut n.kind {
+                    Kind::Block { content } => Some(content),
+                    _ => None,
+                }) else { return self.fail("not a browser pane") };
+                *props = json!({"url": url});
+                #[cfg(target_os = "macos")]
+                if let Some(view) = self.browser_views.get(&pane) {
+                    if let Err(error) = view.update(cx, |v, _| v.raw().load_url(&url)) {
+                        tracing::warn!("browser navigate: {error}");
+                    }
+                    self.browser_urls.insert(pane, url);
+                }
+            }
+            "browser.address" => {
+                let Some(pane) = self.browser_pane(Self::arg(a, "pane")) else { return self.fail("no browser pane") };
+                let url = self.model.tab_of(&pane).and_then(|t| t.root.find(&pane))
+                    .and_then(Node::content)
+                    .and_then(|c| match c { Content::Mod { props, .. } => props.get("url").and_then(Value::as_str), _ => None })
+                    .unwrap_or("https://example.com");
+                let spec = json!({"mod":"browser-url","kind":"dialog","width":520,
+                    "props":{"title":"Browser address","value":url,"hint":"Enter a http:// or https:// address",
+                        "command":{"name":"browser.navigate","args":{"pane":pane}}}});
+                self.open_overlay(mods::new_overlay_id(), spec, window, cx);
+            }
+            "browser.back" | "browser.forward" | "browser.reload" => {
+                let Some(pane) = self.browser_pane(Self::arg(a, "pane")) else { return self.fail("no browser pane") };
+                #[cfg(target_os = "macos")]
+                match self.browser_views.get(&pane) {
+                    Some(view) => {
+                        let result = view.update(cx, |v, _| match name {
+                            "browser.back" => v.back(),
+                            "browser.forward" => v.forward().map_err(anyhow::Error::from),
+                            _ => v.raw().reload().map_err(anyhow::Error::from),
+                        });
+                        if let Err(error) = result { return self.fail(format!("browser action failed: {error:#}")); }
+                    }
+                    None => return self.fail("browser pane is not loaded"),
+                }
+                #[cfg(not(target_os = "macos"))]
+                return self.fail("native browser tabs are available on macOS only");
             }
             "tab.close" => {
                 let Some(id) = Self::owned(a, "id").or(active_ctx) else { return self.fail("no tab to close") };
@@ -4692,6 +4772,7 @@ impl AppWindow {
                 }
                 None => div().into_any_element(),
             },
+            Content::Mod { name, .. } if crate::browser::is_browser(name) => self.render_browser(n, cx),
             Content::Mod { .. } => self.render_slot(&n.id, cx),
             Content::Agent { .. } => match self.shown_agent() {
                 Some(addr) => match self.agent_view(&n.id, &addr) {
@@ -4722,6 +4803,114 @@ impl AppWindow {
                         .into_any_element()
                 }
             },
+        }
+    }
+
+
+    /// Resolve an explicit browser pane, or the first visible one in the active tab.
+    fn browser_pane(&self, requested: Option<&str>) -> Option<String> {
+        if let Some(id) = requested {
+            return self.model.tab_of(id)
+                .and_then(|t| t.root.find(id))
+                .filter(|n| matches!(n.content(), Some(Content::Mod { name, .. }) if crate::browser::is_browser(name)))
+                .map(|n| n.id.clone());
+        }
+        self.model.active_tab()?.shown().visible_blocks().into_iter()
+            .find(|n| matches!(n.content(), Some(Content::Mod { name, .. }) if crate::browser::is_browser(name)))
+            .map(|n| n.id.clone())
+    }
+
+    /// Owns the native WKWebViews for browser panes across tab switches.
+    /// Inactive views stay allocated but hidden; closing a tab releases them.
+    #[cfg(target_os = "macos")]
+    fn sync_browser_views(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mut owned: HashMap<String, Result<String, String>> = HashMap::new();
+        for tab in self.model.tabs() {
+            for node in tab.root.walk() {
+                if let Some(Content::Mod { name, props }) = node.content()
+                    && crate::browser::is_browser(name)
+                {
+                    owned.insert(node.id.clone(), crate::browser::url_from_props(props));
+                }
+            }
+        }
+        let visible: HashSet<String> = if self.shows_tab() {
+            self.model.active_tab().map(|tab| tab.shown().visible_blocks()
+                .into_iter()
+                .filter(|n| matches!(n.content(), Some(Content::Mod { name, .. }) if crate::browser::is_browser(name)))
+                .map(|n| n.id.clone()).collect()).unwrap_or_default()
+        } else { HashSet::new() };
+        let stale: Vec<_> = self.browser_views.keys().filter(|id| !owned.contains_key(*id)).cloned().collect();
+        for id in stale {
+            if let Some(view) = self.browser_views.remove(&id) {
+                view.update(cx, |view, _| view.hide());
+            }
+            self.browser_urls.remove(&id);
+            self.browser_errors.remove(&id);
+        }
+        for (id, desired) in owned {
+            if !visible.contains(&id) {
+                if let Some(view) = self.browser_views.get(&id) {
+                    view.update(cx, |v, _| { if v.visible() { v.hide(); } });
+                }
+                continue;
+            }
+            let url = match desired {
+                Ok(url) => url,
+                Err(error) => { self.browser_errors.insert(id.clone(), error); continue; }
+            };
+            if let Some(view) = self.browser_views.get(&id) {
+                view.update(cx, |v, _| {
+                    if !v.visible() { v.show(); }
+                    if self.browser_urls.get(&id) != Some(&url) { v.load_url(&url); }
+                });
+                self.browser_urls.insert(id, url);
+                continue;
+            }
+            match crate::browser::create(window, cx, &url) {
+                Ok(view) => {
+                    self.browser_views.insert(id.clone(), view);
+                    self.browser_urls.insert(id.clone(), url);
+                    self.browser_errors.remove(&id);
+                }
+                Err(error) => { self.browser_errors.insert(id, error); }
+            }
+        }
+    }
+
+    fn render_browser(&self, n: &Node, cx: &mut Context<Self>) -> AnyElement {
+        #[cfg(target_os = "macos")]
+        {
+            let mut bar = div().flex().flex_row().items_center().gap_2().p_2().bg(c("surface"));
+            for (label, command) in [("←", "browser.back"), ("→", "browser.forward"), ("↻", "browser.reload"), ("URL", "browser.address")] {
+                let pane = n.id.clone();
+                bar = bar.child(div()
+                    .p_1()
+                    .cursor_pointer()
+                    .text_xs()
+                    .child(label)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.run(command, json!({"pane":pane}), window, cx);
+                    })));
+            }
+            if let Some(Content::Mod { props, .. }) = n.content() {
+                if let Some(url) = props.get("url").and_then(Value::as_str) {
+                    bar = bar.child(div().flex_1().min_w_0().overflow_hidden().text_xs().child(url.to_owned()));
+                }
+            }
+            let body: AnyElement = if let Some(view) = self.browser_views.get(&n.id) {
+                div().size_full().child(view.clone()).into_any_element()
+            } else {
+                let error = self.browser_errors.get(&n.id).map(String::as_str).unwrap_or("loading browser...");
+                div().size_full().p_3().text_color(c("dim")).child(error.to_owned()).into_any_element()
+            };
+            return div().flex().flex_col().size_full().child(bar)
+                .child(div().flex_1().min_h_0().child(body)).into_any_element();
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (n, cx);
+            div().size_full().child("Native browser tabs require macOS").into_any_element()
         }
     }
 
