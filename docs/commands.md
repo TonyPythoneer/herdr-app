@@ -183,7 +183,7 @@ No arguments.
 
 ## `browser.list`
 
-List current Browser panes with their Herdr pane identifiers, URLs and engines.
+List current Browser panes with their Herdr pane ids, URL and engine.
 
 No arguments.
 
