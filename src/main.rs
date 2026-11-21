@@ -4,6 +4,7 @@
 mod badge;
 mod bench;
 mod browser;
+mod browser_backend;
 mod commands;
 mod control;
 mod core_bin;
