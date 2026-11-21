@@ -3,57 +3,102 @@ name: browser-macos
 on:
   push:
     branches: [feature/native-browser-tabs]
+  pull_request:
+    branches: [feature/native-browser-tabs]
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: browser-macos-${{ github.ref }}
+  group: browser-macos-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "1"
+  CARGO_PROFILE_TEST_DEBUG: "1"
+  SAVE_CACHES: ${{ github.event_name == 'push' && github.ref == 'refs/heads/feature/native-browser-tabs' }}
+
 jobs:
+  # Only Markdown/MDX-only PRs or pushes get a fast successful required check.
+  # Executable/scripts/config in docs/ still trigger the full macOS validation.
+  changes:
+    name: Classify changed files
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.classify.outputs.build }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check for code/CI changes
+        id: classify
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == workflow_dispatch ]] ||
+             [[ -z "$BASE_SHA" || "$BASE_SHA" =~ ^0+$ ]] ||
+             ! git cat-file -e "$BASE_SHA^{commit}" ||
+             ! git cat-file -e "$HEAD_SHA^{commit}"; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git diff --name-only "$BASE_SHA" "$HEAD_SHA" > "$RUNNER_TEMP/changed.txt"
+          if [[ ! -s "$RUNNER_TEMP/changed.txt" ]]; then
+            build=false
+          elif grep -Eqv '(^|/)[^/]+\.(md|mdx)$' "$RUNNER_TEMP/changed.txt"; then
+            build=true
+          else
+            build=false
+          fi
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+          echo "Browser build required: $build"
+          cat "$RUNNER_TEMP/changed.txt"
+
   browser-macos:
+    needs: changes
+    if: needs.changes.outputs.build == 'true'
     runs-on: macos-15
     timeout-minutes: 90
     steps:
       - name: Checkout upstream-derived fork
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: recursive
           persist-credentials: false
       - name: Rust 1.95 (upstream pinned)
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: 1.95.0
       - name: Zig 0.16 (required by upstream ghostty-sys)
-        uses: mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.16.0
       - name: Restore Rust build cache
         id: browser-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: browser-rust-${{ hashFiles('Cargo.toml', 'Cargo.lock') }}-${{ github.run_number }}
-          restore-keys: |
-            browser-rust-${{ hashFiles('Cargo.toml', 'Cargo.lock') }}-
-            browser-rust-
+          key: browser-rust-v2-macos-aarch64-rust195-zig016-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'vendor/**', 'crates/**', '.github/workflows/browser-macos.yml') }}
+          restore-keys: browser-rust-v2-macos-aarch64-rust195-zig016-
       - name: Restore vendored source timestamps
         run: scripts/ci-sources restore
-      - name: Resolve lockfile for the browser dependency
-        run: cargo metadata --format-version 1 > /dev/null
-      - name: Preserve resolved Cargo lockfile
-        uses: actions/upload-artifact@v4
-        with:
-          name: browser-resolved-cargo-lock
-          path: Cargo.lock
-          if-no-files-found: error
-          retention-days: 7
+      - name: Verify committed browser Cargo.lock is complete
+        run: |
+          set -euo pipefail
+          cargo metadata --locked --format-version 1 > /dev/null
+          git diff --exit-code -- Cargo.lock
       - name: Compile test binaries
         run: cargo test --locked --config 'profile.dev.package."*".opt-level=0' --no-run
       - name: Rust unit and integration tests
@@ -82,28 +127,48 @@ jobs:
           path: dist/Herdr-Browser-macos-arm64.dmg
           if-no-files-found: error
           retention-days: 14
-      - name: Release DMG only after all tests pass
-        if: github.event_name == 'push'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release create "browser-ci-${{ github.run_number }}" \
-            dist/Herdr-Browser-macos-arm64.dmg \
-            --repo "${{ github.repository }}" \
-            --target "${{ github.sha }}" \
-            --title "Herdr Browser macOS CI #${{ github.run_number }}" \
-            --notes 'Experimental unsigned macOS Apple Silicon build of native browser tabs; CI tests and packaging completed.' \
-            --prerelease
+      # Stable GitHub Releases are gated by the full dual-engine E2E and fork
+      # updater package/manifest work; do not publish on each feature push.
       - name: Record vendored source timestamps
-        if: always()
+        if: success() && env.SAVE_CACHES == 'true' && steps.browser-cache.outputs.cache-hit != 'true'
         run: scripts/ci-sources record
-      - name: Cache Rust dependencies even after a failed build
-        if: always()
-        uses: actions/cache/save@v4
+      - name: Save Rust cache only after a successful trusted cache miss
+        if: success() && env.SAVE_CACHES == 'true' && steps.browser-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: browser-rust-${{ hashFiles('Cargo.toml', 'Cargo.lock') }}-${{ github.run_number }}
+          key: ${{ steps.browser-cache.outputs.cache-primary-key }}
+
+      - name: Cache summary
+        if: always()
+        run: |
+          echo "### Browser macOS build" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Cache hit: ${{ steps.browser-cache.outputs.cache-hit }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Cache write permitted: ${{ env.SAVE_CACHES }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- DMG: Actions artifact only; stable release disabled until both real browser backends pass E2E" >> "$GITHUB_STEP_SUMMARY"
+
+  # Stable required status: green for docs-only, red for any mandatory build
+  # failure. A skipped heavy job must never hide a failed code build.
+  browser-ci:
+    name: Browser CI required check
+    needs: [changes, browser-macos]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enforce browser check result
+        env:
+          CLASSIFY_RESULT: ${{ needs.changes.result }}
+          BUILD_REQUIRED: ${{ needs.changes.outputs.build }}
+          BUILD_RESULT: ${{ needs.browser-macos.result }}
+        run: |
+          set -euo pipefail
+          [[ "$CLASSIFY_RESULT" == success ]] || exit 1
+          if [[ "$BUILD_REQUIRED" == true ]]; then
+            [[ "$BUILD_RESULT" == success ]] || exit 1
+          else
+            [[ "$BUILD_RESULT" == skipped ]] || exit 1
+          fi
