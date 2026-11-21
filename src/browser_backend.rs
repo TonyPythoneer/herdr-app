@@ -104,14 +104,17 @@ pub fn capabilities() -> Value {
             "wkwebview": {
                 "available": available.wkwebview,
                 "implemented": available.wkwebview,
-                "actions": ["open", "navigate", "back", "forward", "reload"]
+                "actions": ["open", "navigate", "back", "forward", "reload"],
+                "agent_automation": available.wkwebview,
+                "agent_actions": ["snapshot", "query", "inspect", "eval"],
+                "notes": "DOM observation and approved JS use native WebKit callbacks; native mouse/keyboard/screenshot remain unimplemented"
             },
             "chrome-cdp": {
                 "available": available.chrome_cdp,
                 "implemented": cfg!(target_os = "macos"),
                 "actions": ["open", "navigate", "back", "forward", "reload"],
-                "agent_automation": false,
-                "notes": "GPUI stream/CDP input experimental; agent API and MCP pending"
+                "agent_automation": available.chrome_cdp,
+                "notes": "Chrome CDP Agent API and MCP implemented"
             }
         }
     })
@@ -163,6 +166,6 @@ mod tests {
         assert_eq!(caps["api_version"], API_VERSION);
         assert_eq!(caps["engines"]["chrome-cdp"]["available"], Availability::current().chrome_cdp);
         assert_eq!(caps["engines"]["chrome-cdp"]["implemented"], cfg!(target_os = "macos"));
-        assert_eq!(caps["engines"]["chrome-cdp"]["agent_automation"], false);
+        assert_eq!(caps["engines"]["chrome-cdp"]["agent_automation"], Availability::current().chrome_cdp);
     }
 }
