@@ -43,7 +43,7 @@ impl ChromeView {
                                     reader.frame_timeout(Duration::from_millis(800))
                                 }).await;
                                 let Ok(frame) = result else {
-                                    if this.read(cx).is_err() { break }
+                                    if this.upgrade().is_none() { break }
                                     continue;
                                 };
                                 let decoded = cx.background_executor().spawn(async move {decode_frame(&frame)}).await;
@@ -148,9 +148,9 @@ impl ChromeView {
         cx.stop_propagation();
     }
 
-    fn key(&mut self, ev: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let Some(pane) = &self.session else { return };
-        if !self.focus.is_focused(cx) { return }
+        if !self.focus.is_focused(window) { return }
         let key = ev.keystroke.key.as_str();
         match key {
             "enter" | "return" | "tab" | "backspace" | "delete" | "escape" | "up" | "down" | "left" | "right" => {
