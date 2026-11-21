@@ -4958,6 +4958,8 @@ impl AppWindow {
         });
         self.browser_dispatch_job(request_id.clone(), false, cx);
         self.answer(Ok(json!({
+            "api_version": crate::browser_backend::API_VERSION,
+            "ok": true,
             "status": "accepted",
             "request_id": request_id,
             "pane": pane,
@@ -5007,9 +5009,13 @@ impl AppWindow {
         let (status, pane) = (job.status.clone(), job.pane.clone());
         match status {
             BrowserJobStatus::Running => self.answer(Ok(json!({
+                "api_version":crate::browser_backend::API_VERSION,
+                "ok":true,
                 "status":"accepted", "request_id":id,"pane":pane, "engine":"chrome-cdp"
             }))),
             BrowserJobStatus::ApprovalRequired(reason) => self.answer(Ok(json!({
+                "api_version":crate::browser_backend::API_VERSION,
+                "ok":true,
                 "status":"accepted","request_id":id,"pane":pane,
                 "approval_required":true,"detail":reason,"engine":"chrome-cdp"
             }))),
@@ -5017,10 +5023,12 @@ impl AppWindow {
                 self.browser_jobs.remove(id);
                 let response = match result {
                     Ok(value) => json!({
+                        "api_version":crate::browser_backend::API_VERSION,"ok":true,
                         "status":"completed","request_id":id,"pane":pane,
                         "engine":"chrome-cdp","result":value
                     }),
                     Err(error) => json!({
+                        "api_version":crate::browser_backend::API_VERSION,"ok":false,
                         "status":"failed","request_id":id,"pane":pane,
                         "engine":"chrome-cdp","error":error
                     }),
@@ -5040,8 +5048,9 @@ impl AppWindow {
         };
         job.cancelled.store(true, std::sync::atomic::Ordering::Release);
         self.answer(Ok(json!({
-            "status":"cancelled","request_id":id,"pane":job.pane,
-            "note":"already dispatched browser input cannot be undone"
+            "api_version":crate::browser_backend::API_VERSION,"ok":true,
+            "status":"completed","request_id":id,"pane":job.pane,
+            "result":{"cancelled":true,"note":"already dispatched browser input cannot be undone"}
         })));
         cx.notify();
     }

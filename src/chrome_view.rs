@@ -20,6 +20,7 @@ pub struct ChromeView {
     bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
     viewport: Arc<AtomicU64>,
     mouse_pressed: bool,
+    last_pointer: Option<(f64, f64)>,
     visible: bool,
     _load: Option<Task<()>>,
     _frames: Option<Task<()>>,
@@ -34,6 +35,7 @@ impl ChromeView {
     pub fn new(pane_id: String, url: String, cx: &mut Context<Self>) -> Self {
         let open_url = url.clone();
         let loader = cx.spawn(async move |this, cx| {
+            let launched_url = open_url.clone();
             let ready = cx.background_executor().spawn(async move {
                 let client = chrome_cdp::shared_client()?;
                 let pane = client.open(&open_url)?;
@@ -67,6 +69,23 @@ impl ChromeView {
                         if !this.visible {
                             let _ = session.post("Page.stopScreencast", json!({}));
                         }
+                        // An Agent can navigate while Chrome is still starting.
+                        // Never replace that newer desired URL with the launch URL.
+                        if this.url != launched_url {
+                            let newer_url = this.url.clone();
+                            let newer_session = session.clone();
+                            cx.spawn(async move |this, cx| {
+                                let result = cx.background_executor().spawn(async move {
+                                    newer_session.navigate(&newer_url)
+                                }).await;
+                                if let Err(error) = result {
+                                    let _ = this.update(cx, |this, cx| {
+                                        this.error = Some(error);
+                                        cx.notify();
+                                    });
+                                }
+                            }).detach();
+                        }
                         this.session = Some(session);
                         this.error = None;
                     }
@@ -78,7 +97,8 @@ impl ChromeView {
         Self {
             pane_id, url, session: None, frame: None, error: None,
             focus: cx.focus_handle(), bounds: Rc::new(RefCell::new(None)),
-            viewport: Arc::new(AtomicU64::new(0)), mouse_pressed: false, visible: true,
+            viewport: Arc::new(AtomicU64::new(0)), mouse_pressed: false,
+            last_pointer: None, visible: true,
             _load: Some(loader), _frames: None,
         }
     }
@@ -150,13 +170,16 @@ impl ChromeView {
         let _ = pane.post("Input.dispatchMouseEvent",
             json!({"type":"mousePressed","x":x,"y":y,"button":"left","clickCount":1}));
         self.mouse_pressed = true;
+        self.last_pointer = Some((x, y));
         cx.stop_propagation();
     }
 
     fn mouse_up(&mut self, ev: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
         if !self.mouse_pressed { return }
         self.mouse_pressed = false;
-        let Some((x, y)) = self.relative(ev.position) else { return };
+        let target = self.relative(ev.position).or(self.last_pointer);
+        self.last_pointer = None;
+        let Some((x, y)) = target else { return };
         let Some(pane) = &self.session else { return };
         let _ = pane.post("Input.dispatchMouseEvent",
             json!({"type":"mouseReleased","x":x,"y":y,"button":"left","clickCount":1}));
@@ -165,9 +188,14 @@ impl ChromeView {
 
     fn move_pointer(&mut self, ev: &MouseMoveEvent, _: &mut Window, _: &mut Context<Self>) {
         let Some((x, y)) = self.relative(ev.position) else { return };
+        self.last_pointer = Some((x, y));
+        let pressed = self.mouse_pressed;
         let Some(pane) = &self.session else { return };
-        let _ = pane.post("Input.dispatchMouseEvent",
-            json!({"type":"mouseMoved","x":x,"y":y,"button":"none"}));
+        let _ = pane.post("Input.dispatchMouseEvent", json!({
+            "type":"mouseMoved","x":x,"y":y,
+            "button": if pressed { "left" } else { "none" },
+            "buttons": if pressed { 1 } else { 0 }
+        }));
     }
 
     fn wheel(&mut self, ev: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
