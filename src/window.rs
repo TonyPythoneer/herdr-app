@@ -3327,7 +3327,7 @@ impl AppWindow {
                     Some(view) => {
                         let result = view.update(cx, |v, _| match name {
                             "browser.back" => v.back(),
-                            "browser.forward" => v.forward().map_err(anyhow::Error::from),
+                            "browser.forward" => v.raw().evaluate_script("history.forward();").map_err(anyhow::Error::from),
                             _ => v.raw().reload().map_err(anyhow::Error::from),
                         });
                         if let Err(error) = result { return self.fail(format!("browser action failed: {error:#}")); }
@@ -4887,6 +4887,7 @@ impl AppWindow {
             for (label, command) in [("←", "browser.back"), ("→", "browser.forward"), ("↻", "browser.reload"), ("URL", "browser.address")] {
                 let pane = n.id.clone();
                 bar = bar.child(div()
+                    .id(SharedString::from(format!("browser-{}-{command}", n.id)))
                     .p_1()
                     .cursor_pointer()
                     .text_xs()
