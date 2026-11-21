@@ -30,8 +30,30 @@ jobs:
         uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
+      - name: Restore Rust build cache
+        id: browser-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: browser-rust-${{ hashFiles('Cargo.toml', 'Cargo.lock') }}-${{ github.run_number }}
+          restore-keys: |
+            browser-rust-${{ hashFiles('Cargo.toml', 'Cargo.lock') }}-
+            browser-rust-
+      - name: Restore vendored source timestamps
+        run: scripts/ci-sources restore
       - name: Resolve lockfile for the browser dependency
         run: cargo metadata --format-version 1 > /dev/null
+      - name: Preserve resolved Cargo lockfile
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-resolved-cargo-lock
+          path: Cargo.lock
+          if-no-files-found: error
+          retention-days: 7
       - name: Compile test binaries
         run: cargo test --locked --config 'profile.dev.package."*".opt-level=0' --no-run
       - name: Rust unit and integration tests
@@ -70,3 +92,16 @@ jobs:
             --title "Herdr Browser macOS CI #${{ github.run_number }}" \
             --notes 'Experimental unsigned macOS Apple Silicon build of native browser tabs; CI tests and packaging completed.' \
             --prerelease
+      - name: Record vendored source timestamps
+        if: always()
+        run: scripts/ci-sources record
+      - name: Cache Rust dependencies even after a failed build
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: browser-rust-${{ hashFiles('Cargo.toml', 'Cargo.lock') }}-${{ github.run_number }}
