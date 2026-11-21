@@ -5,6 +5,8 @@ mod badge;
 mod bench;
 mod browser;
 mod browser_backend;
+#[cfg(target_os = "macos")]
+mod chrome_cdp;
 mod commands;
 mod control;
 mod core_bin;
