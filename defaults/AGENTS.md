@@ -1208,3 +1208,19 @@ including a small herdr-core skill you can install with the user's permission.
 - One mod per idea. Don't edit `AGENTS.md` or the `.d.ts` files (the app
   rewrites them). Don't touch other mods unless the request
   needs it.
+
+
+### Native browser tabs (macOS fork extension)
+
+These commands use a system WKWebView inside the existing Herdr tab and pane layout;
+they do not start Chromium or a new desktop window. They are fork-specific:
+
+- `browser.open` — create a Browser tab: `herdr-app do browser.open '{"url":"https://example.com"}'`
+- `browser.navigate` — load an URL in a browser pane (optional `pane`).
+- `browser.address` — show the browser URL input dialog.
+- `browser.back` — navigate back in history.
+- `browser.forward` — navigate forward in history.
+- `browser.reload` — reload the currently selected browser pane.
+
+The browser is backed by macOS WKWebView. Browser data stays in the native
+WebKit profile. These commands operate on the desktop UI process, not herdr-core.
