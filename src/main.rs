@@ -3,6 +3,7 @@
 
 mod badge;
 mod bench;
+mod browser;
 mod commands;
 mod control;
 mod core_bin;
