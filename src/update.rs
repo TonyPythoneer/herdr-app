@@ -120,7 +120,10 @@ pub fn set_core(version: Option<String>, managed: Option<String>) {
 }
 
 fn checks_app() -> Option<PathBuf> {
-    root().filter(|_| option_env!("HERDR_APP_RELEASE").is_some() || std::env::var_os("HERDR_RELEASES_URL").is_some())
+    // A forked macOS browser release must never replace itself with an official Herdr binary.
+    // Core updates remain enabled; only automatic desktop app replacement is disabled.
+    root().filter(|_| option_env!("HERDR_BROWSER_FORK").is_none()
+        && (option_env!("HERDR_APP_RELEASE").is_some() || std::env::var_os("HERDR_RELEASES_URL").is_some()))
 }
 
 /// A release build checks the core; a source build only when pointed at a test release server.
