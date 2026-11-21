@@ -1,0 +1,72 @@
+name: browser-macos
+
+on:
+  push:
+    branches: [feature/native-browser-tabs]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: browser-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  browser-macos:
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - name: Checkout upstream-derived fork
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - name: Rust 1.95 (upstream pinned)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+      - name: Zig 0.16 (required by upstream ghostty-sys)
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Resolve lockfile for the browser dependency
+        run: cargo metadata --format-version 1 > /dev/null
+      - name: Compile test binaries
+        run: cargo test --locked --config 'profile.dev.package."*".opt-level=0' --no-run
+      - name: Rust unit and integration tests
+        run: cargo test --locked --config 'profile.dev.package."*".opt-level=0' --bins
+      - name: Native macOS screenshot tests
+        env:
+          HERDR_SHOT_NATIVE_TEST: "1"
+        run: cargo test --locked --config 'profile.dev.package."*".opt-level=0' --test shot_pixels
+      - name: Build macOS app through upstream packaging
+        run: scripts/package
+      - name: Assemble Apple Silicon DMG
+        run: |
+          set -euo pipefail
+          tar -xzf dist/herdr-app-macos-aarch64.tar.gz -C dist
+          mkdir -p dist/dmg-root
+          ditto dist/Herdr.app dist/dmg-root/Herdr.app
+          ln -s /Applications dist/dmg-root/Applications
+          hdiutil create -volname 'Herdr Browser' -srcfolder dist/dmg-root -format UDZO -ov dist/Herdr-Browser-macos-arm64.dmg
+          test -s dist/Herdr-Browser-macos-arm64.dmg
+      - name: Upload macOS DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Herdr-Browser-macos-arm64
+          path: dist/Herdr-Browser-macos-arm64.dmg
+          if-no-files-found: error
+          retention-days: 14
+      - name: Release DMG only after all tests pass
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "browser-ci-${{ github.run_number }}" \
+            dist/Herdr-Browser-macos-arm64.dmg \
+            --repo "${{ github.repository }}" \
+            --target "${{ github.sha }}" \
+            --title "Herdr Browser macOS CI #${{ github.run_number }}" \
+            --notes 'Experimental unsigned macOS Apple Silicon build of native browser tabs; CI tests and packaging completed.' \
+            --prerelease
