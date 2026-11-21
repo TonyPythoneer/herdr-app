@@ -17,6 +17,7 @@ on:
 permissions:
   contents: write
   actions: read
+  checks: read
 
 concurrency:
   group: webview-stable-release
