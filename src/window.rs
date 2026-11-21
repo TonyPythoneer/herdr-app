@@ -18,6 +18,7 @@ use crate::settings;
 use crate::layout_sync;
 use crate::terminal::{TerminalEvent, TerminalView, scroll_target};
 use gpui::prelude::FluentBuilder as _;
+use gpui_base::StyledExt as _;
 use gpui::*;
 use gpui_shell::action::ShellAction;
 use gpui_shell::{ShellRoot, ShellRuntime, Watcher};
