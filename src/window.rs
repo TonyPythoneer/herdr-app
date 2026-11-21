@@ -3275,15 +3275,24 @@ impl AppWindow {
                 };
                 self.answer(r);
             }
+            "browser.capabilities" => {
+                self.answer(Ok(crate::browser_backend::capabilities()));
+            }
             "browser.open" => {
                 let Some(focus) = Self::focus(a) else { return self.fail("browser.open focus is true or false") };
+                let engine = match crate::browser_backend::resolve_new_tab(
+                    Self::arg(a, "engine"), crate::browser_backend::Availability::current(),
+                ) {
+                    Ok(engine) => engine,
+                    Err(error) => return self.fail(error),
+                };
                 let input = Self::arg(a, "url").unwrap_or("https://example.com");
                 let url = match crate::browser::normalize_url(input) {
                     Ok(url) => url,
                     Err(error) => return self.fail(error),
                 };
                 let result = self.new_mod_tab(Self::owned(a, "space"), Self::arg(a, "name").unwrap_or("Browser"),
-                    crate::browser::MOD_NAME.to_owned(), json!({"url": url}), focus);
+                    crate::browser::MOD_NAME.to_owned(), json!({"url": url, "engine": engine.as_str()}), focus);
                 self.answer(result);
             }
             "browser.navigate" => {
@@ -3300,7 +3309,7 @@ impl AppWindow {
                     Kind::Block { content } => Some(content),
                     _ => None,
                 }) else { return self.fail("not a browser pane") };
-                *props = json!({"url": url});
+                crate::browser_backend::set_pane_url(props, &url);
                 #[cfg(target_os = "macos")]
                 if let Some(view) = self.browser_views.get(&pane) {
                     if let Err(error) = view.update(cx, |v, _| v.raw().load_url(&url)) {
@@ -4831,7 +4840,16 @@ impl AppWindow {
                 if let Some(Content::Mod { name, props }) = node.content()
                     && crate::browser::is_browser(name)
                 {
-                    owned.insert(node.id.clone(), crate::browser::url_from_props(props));
+                    // Until ChromeCdpAdapter is integrated, an explicitly
+                    // persisted Chrome pane must NEVER be shown as WKWebView.
+                    let resolved = match crate::browser_backend::from_persisted(props) {
+                        Ok(crate::browser_backend::BrowserEngine::WkWebView) => crate::browser::url_from_props(props),
+                        Ok(crate::browser_backend::BrowserEngine::ChromeCdp) => {
+                            Err("Chrome CDP backend is not available in this build".into())
+                        }
+                        Err(error) => Err(error),
+                    };
+                    owned.insert(node.id.clone(), resolved);
                 }
             }
         }
@@ -4858,7 +4876,14 @@ impl AppWindow {
             }
             let url = match desired {
                 Ok(url) => url,
-                Err(error) => { self.browser_errors.insert(id.clone(), error); continue; }
+                Err(error) => {
+                    if let Some(view) = self.browser_views.remove(&id) {
+                        view.update(cx, |v, _| v.hide());
+                    }
+                    self.browser_urls.remove(&id);
+                    self.browser_errors.insert(id.clone(), error);
+                    continue;
+                }
             };
             if let Some(view) = self.browser_views.get(&id) {
                 let needs_navigation = self.browser_urls.get(&id) != Some(&url);
