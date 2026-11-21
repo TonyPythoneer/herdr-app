@@ -18,6 +18,7 @@ use crate::settings;
 use crate::layout_sync;
 use crate::terminal::{TerminalEvent, TerminalView, scroll_target};
 use gpui::prelude::FluentBuilder as _;
+use gpui_base::StyledExt as _;
 use gpui::*;
 use gpui_shell::action::ShellAction;
 use gpui_shell::{ShellRoot, ShellRuntime, Watcher};
@@ -390,6 +391,37 @@ struct Watched {
     programs: Option<SystemTime>,
 }
 
+
+#[cfg(target_os = "macos")]
+#[derive(Clone)]
+enum BrowserJobStatus {
+    Running,
+    ApprovalRequired(String),
+    Finished(Result<Value, String>),
+}
+
+#[cfg(target_os = "macos")]
+struct BrowserJob {
+    pane: String,
+    action: String,
+    args: Value,
+    session: Arc<crate::chrome_cdp::Session>,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
+    status: BrowserJobStatus,
+}
+
+/// Random, unguessable, per-request identifier. A numeric sequence would let
+/// another local Agent inspect or cancel an unrelated pane's browser result.
+#[cfg(target_os = "macos")]
+fn new_browser_request_id() -> Result<String, String> {
+    use std::io::Read as _;
+    let mut bytes = [0u8; 16];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut file| file.read_exact(&mut bytes))
+        .map_err(|error| format!("cannot generate browser request ID: {error}"))?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
 pub struct AppWindow {
     core: Arc<Core>,
     runtime: Option<Rc<ShellRuntime>>,
@@ -426,6 +458,12 @@ pub struct AppWindow {
     /// Native macOS WKWebViews, keyed by existing Herdr pane id (no new tab model).
     #[cfg(target_os = "macos")]
     browser_views: HashMap<String, Entity<gpui_wry::WebView>>,
+    /// CDP stream views, keyed by the same upstream pane identifiers.
+    #[cfg(target_os = "macos")]
+    chrome_views: HashMap<String, Entity<crate::chrome_view::ChromeView>>,
+    /// Bounded Agent operations, awaiting a result or a native user decision.
+    #[cfg(target_os = "macos")]
+    browser_jobs: HashMap<String, BrowserJob>,
     #[cfg(target_os = "macos")]
     browser_urls: HashMap<String, String>,
     #[cfg(target_os = "macos")]
@@ -561,6 +599,10 @@ impl AppWindow {
             terms: HashMap::new(),
             #[cfg(target_os = "macos")]
             browser_views: HashMap::new(),
+            #[cfg(target_os = "macos")]
+            chrome_views: HashMap::new(),
+            #[cfg(target_os = "macos")]
+            browser_jobs: HashMap::new(),
             #[cfg(target_os = "macos")]
             browser_urls: HashMap::new(),
             #[cfg(target_os = "macos")]
@@ -3275,15 +3317,69 @@ impl AppWindow {
                 };
                 self.answer(r);
             }
+            "browser.capabilities" => {
+                self.answer(Ok(crate::browser_backend::capabilities()));
+            }
+            "browser.list" => {
+                let mut panes = Vec::new();
+                for tab in self.model.tabs() {
+                    for node in tab.root.walk() {
+                        if let Some(Content::Mod { name, props }) = node.content()
+                            && crate::browser::is_browser(name)
+                        {
+                            let engine = crate::browser_backend::from_persisted(props);
+                            panes.push(json!({
+                                "pane": node.id,
+                                "tab": tab.id,
+                                "url": props.get("url").and_then(Value::as_str),
+                                "engine": engine.ok().map(crate::browser_backend::BrowserEngine::as_str),
+                            }));
+                        }
+                    }
+                }
+                self.answer(Ok(json!({ "panes":panes })));
+            }
+            "browser.snapshot" | "browser.query" | "browser.inspect" | "browser.click"
+            | "browser.click_at" | "browser.fill" | "browser.type" | "browser.press"
+            | "browser.scroll" | "browser.wait" | "browser.eval" | "browser.screenshot" => {
+                #[cfg(target_os = "macos")]
+                self.browser_start_job(name, a, cx);
+                #[cfg(not(target_os = "macos"))]
+                self.fail("UNSUPPORTED_ENGINE: native browser Agent commands require macOS");
+            }
+            "browser.result" => {
+                #[cfg(target_os = "macos")]
+                self.browser_result(a);
+                #[cfg(not(target_os = "macos"))]
+                self.fail("UNSUPPORTED_ENGINE: browser Agent commands require macOS");
+            }
+            "browser.cancel" => {
+                #[cfg(target_os = "macos")]
+                self.browser_cancel(a, cx);
+                #[cfg(not(target_os = "macos"))]
+                self.fail("UNSUPPORTED_ENGINE: browser Agent commands require macOS");
+            }
             "browser.open" => {
                 let Some(focus) = Self::focus(a) else { return self.fail("browser.open focus is true or false") };
+                let requested_engine = match a.get("engine") {
+                    None | Some(Value::Null) => None,
+                    Some(Value::String(engine)) => Some(engine.as_str()),
+                    Some(_) => return self.fail("browser.open engine must be a string"),
+                };
+                let engine = match crate::browser_backend::resolve_new_tab(
+                    requested_engine, crate::browser_backend::Availability::current(),
+                ) {
+                    Ok(engine) => engine,
+                    Err(error) => return self.fail(error),
+                };
                 let input = Self::arg(a, "url").unwrap_or("https://example.com");
                 let url = match crate::browser::normalize_url(input) {
                     Ok(url) => url,
                     Err(error) => return self.fail(error),
                 };
                 let result = self.new_mod_tab(Self::owned(a, "space"), Self::arg(a, "name").unwrap_or("Browser"),
-                    crate::browser::MOD_NAME.to_owned(), json!({"url": url}), focus);
+                    crate::browser::MOD_NAME.to_owned(), json!({"url": url, "engine": engine.as_str()}), focus)
+                    .map(|mut record| { record["engine"] = json!(engine.as_str()); record });
                 self.answer(result);
             }
             "browser.navigate" => {
@@ -3300,13 +3396,18 @@ impl AppWindow {
                     Kind::Block { content } => Some(content),
                     _ => None,
                 }) else { return self.fail("not a browser pane") };
-                *props = json!({"url": url});
+                crate::browser_backend::set_pane_url(props, &url);
                 #[cfg(target_os = "macos")]
-                if let Some(view) = self.browser_views.get(&pane) {
-                    if let Err(error) = view.update(cx, |v, _| v.raw().load_url(&url)) {
-                        tracing::warn!("browser navigate: {error}");
+                {
+                    if let Some(view) = self.browser_views.get(&pane) {
+                        if let Err(error) = view.update(cx, |v, _| v.raw().load_url(&url)) {
+                            tracing::warn!("browser navigate: {error}");
+                        }
+                        self.browser_urls.insert(pane.clone(), url.clone());
                     }
-                    self.browser_urls.insert(pane, url);
+                    if let Some(view) = self.chrome_views.get(&pane) {
+                        view.update(cx, |v, cx| v.navigate(&url, cx));
+                    }
                 }
             }
             "browser.address" => {
@@ -3323,16 +3424,24 @@ impl AppWindow {
             "browser.back" | "browser.forward" | "browser.reload" => {
                 let Some(pane) = self.browser_pane(Self::arg(a, "pane")) else { return self.fail("no browser pane") };
                 #[cfg(target_os = "macos")]
-                match self.browser_views.get(&pane) {
-                    Some(view) => {
-                        let result = view.update(cx, |v, _| match name {
-                            "browser.back" => v.back(),
-                            "browser.forward" => v.raw().evaluate_script("history.forward();").map_err(anyhow::Error::from),
-                            _ => v.raw().reload().map_err(anyhow::Error::from),
-                        });
-                        if let Err(error) = result { return self.fail(format!("browser action failed: {error:#}")); }
+                {
+                    if let Some(view) = self.chrome_views.get(&pane) {
+                        if let Err(error) = view.update(cx, |v, cx| v.action(name, cx)) {
+                            return self.fail(error);
+                        }
+                    } else {
+                        match self.browser_views.get(&pane) {
+                            Some(view) => {
+                                let result = view.update(cx, |v, _| match name {
+                                    "browser.back" => v.back(),
+                                    "browser.forward" => v.raw().evaluate_script("history.forward();").map_err(anyhow::Error::from),
+                                    _ => v.raw().reload().map_err(anyhow::Error::from),
+                                });
+                                if let Err(error) = result { return self.fail(format!("browser action failed: {error:#}")); }
+                            }
+                            None => return self.fail("browser pane is not loaded"),
+                        }
                     }
-                    None => return self.fail("browser pane is not loaded"),
                 }
                 #[cfg(not(target_os = "macos"))]
                 return self.fail("native browser tabs are available on macOS only");
@@ -4808,6 +4917,191 @@ impl AppWindow {
     }
 
 
+
+    /// Do not block the GPUI event loop on CDP I/O. Only the native approval
+    /// button can change a request from ApprovalRequired to approved.
+    #[cfg(target_os = "macos")]
+    fn browser_start_job(&mut self, name: &str, args: &Value, cx: &mut Context<Self>) {
+        let Some(pane_id) = Self::arg(args, "pane") else {
+            return self.fail("INVALID_ARGUMENT: browser Agent commands require an explicit pane ID");
+        };
+        let Some(pane) = self.browser_pane(Some(pane_id)) else {
+            return self.fail("PANE_NOT_FOUND: browser pane does not exist");
+        };
+        // A job waiting for human approval holds the lane: a later mutation
+        // cannot overtake it and accidentally act on an altered page.
+        if self.browser_jobs.values().any(|job|
+            job.pane == pane && !matches!(job.status, BrowserJobStatus::Finished(_))
+        ) {
+            return self.fail("BROWSER_BUSY: finish, approve or cancel the current pane operation");
+        }
+        if self.browser_jobs.len() >= 64 {
+            return self.fail("TOO_MANY_REQUESTS: collect browser.result for completed operations");
+        }
+        let Some(view) = self.chrome_views.get(&pane) else {
+            return self.fail("UNSUPPORTED_ENGINE: Agent automation currently requires Chrome CDP");
+        };
+        let Some(session) = view.read(cx).session() else {
+            return self.fail("BROWSER_NOT_READY: Chrome is still starting; retry after a moment");
+        };
+        let request_id = match new_browser_request_id() {
+            Ok(id) => id,
+            Err(error) => return self.fail(error),
+        };
+        self.browser_jobs.insert(request_id.clone(), BrowserJob {
+            pane: pane.clone(),
+            action: name.to_owned(),
+            args: args.clone(),
+            session,
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            status: BrowserJobStatus::Running,
+        });
+        self.browser_dispatch_job(request_id.clone(), false, cx);
+        self.answer(Ok(json!({
+            "api_version": crate::browser_backend::API_VERSION,
+            "ok": true,
+            "status": "accepted",
+            "request_id": request_id,
+            "pane": pane,
+            "engine": "chrome-cdp"
+        })));
+    }
+
+    #[cfg(target_os = "macos")]
+    fn browser_dispatch_job(&mut self, id: String, approved: bool, cx: &mut Context<Self>) {
+        let Some(job) = self.browser_jobs.get_mut(&id) else { return };
+        let (action, args, session, cancel) = (
+            job.action.clone(), job.args.clone(), job.session.clone(), job.cancelled.clone()
+        );
+        job.status = BrowserJobStatus::Running;
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_executor().spawn(async move {
+                crate::browser_api::run(&session, &action, &args, approved, &cancel)
+            }).await;
+            let _ = this.update(cx, |this, cx| {
+                if let Some(job) = this.browser_jobs.get_mut(&id) {
+                    if job.cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                        job.status = BrowserJobStatus::Finished(Err("CANCELLED".into()));
+                    } else if let Err(error) = &result {
+                        if !approved && error.starts_with("APPROVAL_REQUIRED:") {
+                            job.status = BrowserJobStatus::ApprovalRequired(error.clone());
+                        } else {
+                            job.status = BrowserJobStatus::Finished(result);
+                        }
+                    } else {
+                        job.status = BrowserJobStatus::Finished(result);
+                    }
+                    cx.notify();
+                }
+            });
+        }).detach();
+    }
+
+    /// An Agent may poll request results but cannot approve its own action.
+    #[cfg(target_os = "macos")]
+    fn browser_result(&mut self, args: &Value) {
+        let Some(id) = Self::arg(args, "request_id") else {
+            return self.fail("browser.result requires request_id");
+        };
+        let Some(job) = self.browser_jobs.get(id) else {
+            return self.fail("REQUEST_NOT_FOUND: browser job may have been collected or cancelled");
+        };
+        let (status, pane) = (job.status.clone(), job.pane.clone());
+        match status {
+            BrowserJobStatus::Running => self.answer(Ok(json!({
+                "api_version":crate::browser_backend::API_VERSION,
+                "ok":true,
+                "status":"accepted", "request_id":id,"pane":pane, "engine":"chrome-cdp"
+            }))),
+            BrowserJobStatus::ApprovalRequired(reason) => self.answer(Ok(json!({
+                "api_version":crate::browser_backend::API_VERSION,
+                "ok":true,
+                "status":"accepted","request_id":id,"pane":pane,
+                "approval_required":true,"detail":reason,"engine":"chrome-cdp"
+            }))),
+            BrowserJobStatus::Finished(result) => {
+                self.browser_jobs.remove(id);
+                let response = match result {
+                    Ok(value) => json!({
+                        "api_version":crate::browser_backend::API_VERSION,"ok":true,
+                        "status":"completed","request_id":id,"pane":pane,
+                        "engine":"chrome-cdp","result":value
+                    }),
+                    Err(error) => json!({
+                        "api_version":crate::browser_backend::API_VERSION,"ok":false,
+                        "status":"failed","request_id":id,"pane":pane,
+                        "engine":"chrome-cdp","error":error
+                    }),
+                };
+                self.answer(Ok(response));
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn browser_cancel(&mut self, args: &Value, cx: &mut Context<Self>) {
+        let Some(id) = Self::arg(args, "request_id") else {
+            return self.fail("browser.cancel requires request_id");
+        };
+        let Some(job) = self.browser_jobs.remove(id) else {
+            return self.fail("REQUEST_NOT_FOUND: browser operation not found");
+        };
+        job.cancelled.store(true, std::sync::atomic::Ordering::Release);
+        self.answer(Ok(json!({
+            "api_version":crate::browser_backend::API_VERSION,"ok":true,
+            "status":"completed","request_id":id,"pane":job.pane,
+            "result":{"cancelled":true,"note":"already dispatched browser input cannot be undone"}
+        })));
+        cx.notify();
+    }
+
+    /// Called *only* from native GPUI buttons, not an app command/mod/CLI/MCP.
+    #[cfg(target_os = "macos")]
+    fn browser_decide(&mut self, id: &str, allow: bool, cx: &mut Context<Self>) {
+        let Some(job) = self.browser_jobs.get_mut(id) else { return };
+        if !matches!(job.status, BrowserJobStatus::ApprovalRequired(_)) { return }
+        if allow {
+            self.browser_dispatch_job(id.to_owned(), true, cx);
+        } else {
+            job.status = BrowserJobStatus::Finished(Err("PERMISSION_DENIED: the person declined the browser action".into()));
+        }
+        cx.notify();
+    }
+
+    #[cfg(target_os = "macos")]
+    fn browser_approval_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (id, job) = self.browser_jobs.iter()
+            .find(|(_, job)| matches!(job.status, BrowserJobStatus::ApprovalRequired(_)))?;
+        let BrowserJobStatus::ApprovalRequired(reason) = &job.status else { return None };
+        let yes = id.clone();
+        let no = id.clone();
+        let risk = reason.clone();
+        let summary = format!("{} • Pane {}", job.action, job.pane);
+        let pane = div().w(px(520.)).p_4().rounded_lg().bg(c("raised"))
+            .border_1().border_color(c("border"))
+            .shadow_lg()
+            .flex().flex_col().gap_3()
+            .child(div().font_bold().text_lg().child("Approve browser action?"))
+            .child(div().text_sm().child(summary))
+            .child(div().text_sm().child(risk))
+            .child(div().text_sm().text_color(c("dim"))
+                .child("This request came from an Agent. Approve once for this exact request, or deny."))
+            .child(div().flex().flex_row().gap_3()
+                .child(div().id(SharedString::from(format!("browser-deny-{no}")))
+                    .cursor_pointer().p_2().rounded_md().bg(c("hover"))
+                    .on_click(cx.listener(move |this, _, _, cx| this.browser_decide(&no, false, cx)))
+                    .child("Deny"))
+                .child(div().id(SharedString::from(format!("browser-approve-{yes}")))
+                    .cursor_pointer().p_2().rounded_md().bg(c("accent"))
+                    .on_click(cx.listener(move |this, _, _, cx| this.browser_decide(&yes, true, cx)))
+                    .child("Approve once")));
+        Some(div().id("browser-native-approval").absolute().inset_0()
+            .flex().items_center().justify_center()
+            .bg(rgba(0x000000bb))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(pane).into_any_element())
+    }
+
     /// Resolve an explicit browser pane, or the first visible one in the active tab.
     fn browser_pane(&self, requested: Option<&str>) -> Option<String> {
         if let Some(id) = requested {
@@ -4821,17 +5115,20 @@ impl AppWindow {
             .map(|n| n.id.clone())
     }
 
-    /// Owns the native WKWebViews for browser panes across tab switches.
-    /// Inactive views stay allocated but hidden; closing a tab releases them.
+    /// Each Herdr pane owns one engine. Hidden panes preserve their sessions,
+    /// while removed panes release their native view or CDP target.
     #[cfg(target_os = "macos")]
     fn sync_browser_views(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let mut owned: HashMap<String, Result<String, String>> = HashMap::new();
+        use crate::browser_backend::BrowserEngine;
+        let mut owned: HashMap<String, Result<(BrowserEngine, String), String>> = HashMap::new();
         for tab in self.model.tabs() {
             for node in tab.root.walk() {
                 if let Some(Content::Mod { name, props }) = node.content()
                     && crate::browser::is_browser(name)
                 {
-                    owned.insert(node.id.clone(), crate::browser::url_from_props(props));
+                    let desired = crate::browser_backend::from_persisted(props)
+                        .and_then(|engine| Ok((engine, crate::browser::url_from_props(props)?)));
+                    owned.insert(node.id.clone(), desired);
                 }
             }
         }
@@ -4841,25 +5138,70 @@ impl AppWindow {
                 .filter(|n| matches!(n.content(), Some(Content::Mod { name, .. }) if crate::browser::is_browser(name)))
                 .map(|n| n.id.clone()).collect()).unwrap_or_default()
         } else { HashSet::new() };
-        let stale: Vec<_> = self.browser_views.keys().filter(|id| !owned.contains_key(*id)).cloned().collect();
-        for id in stale {
+        let stale_wk: Vec<_> = self.browser_views.keys()
+            .filter(|id| !matches!(owned.get(*id), Some(Ok((BrowserEngine::WkWebView, _)))))
+            .cloned().collect();
+        for id in stale_wk {
             if let Some(view) = self.browser_views.remove(&id) {
                 view.update(cx, |view, _| view.hide());
             }
             self.browser_urls.remove(&id);
-            self.browser_errors.remove(&id);
         }
+        let stale_chrome: Vec<_> = self.chrome_views.keys()
+            .filter(|id| !matches!(owned.get(*id), Some(Ok((BrowserEngine::ChromeCdp, _)))))
+            .cloned().collect();
+        for id in stale_chrome { self.chrome_views.remove(&id); }
+        self.browser_jobs.retain(|_, job| {
+            let keep = owned.get(&job.pane).is_some_and(|value|
+                matches!(value, Ok((BrowserEngine::ChromeCdp, _))));
+            if !keep {
+                job.cancelled.store(true, std::sync::atomic::Ordering::Release);
+            }
+            keep
+        });
+        self.browser_errors.retain(|id, _| owned.contains_key(id));
         for (id, desired) in owned {
-            if !visible.contains(&id) {
+            let pane_visible = visible.contains(&id);
+            let (engine, url) = match desired {
+                Ok(info) => info,
+                Err(error) => {
+                    if let Some(view) = self.browser_views.remove(&id) {
+                        view.update(cx, |v, _| v.hide());
+                    }
+                    self.chrome_views.remove(&id);
+                    self.browser_urls.remove(&id);
+                    self.browser_errors.insert(id, error);
+                    continue;
+                }
+            };
+            if engine == BrowserEngine::ChromeCdp {
+                if let Some(view) = self.browser_views.remove(&id) {
+                    view.update(cx, |v, _| v.hide());
+                }
+                self.browser_urls.remove(&id);
+                self.browser_errors.remove(&id);
+                if let Some(view) = self.chrome_views.get(&id) {
+                    view.update(cx, |v, cx| {
+                        v.set_visible(pane_visible);
+                        v.navigate(&url, cx);
+                    });
+                } else {
+                    let pane_id = id.clone();
+                    let view = cx.new(|cx|
+                        crate::chrome_view::ChromeView::new(pane_id, url, cx));
+                    if !pane_visible {
+                        view.update(cx, |v, _| v.set_visible(false));
+                    }
+                    self.chrome_views.insert(id, view);
+                }
+                continue;
+            }
+            if !pane_visible {
                 if let Some(view) = self.browser_views.get(&id) {
                     view.update(cx, |v, _| { if v.visible() { v.hide(); } });
                 }
                 continue;
             }
-            let url = match desired {
-                Ok(url) => url,
-                Err(error) => { self.browser_errors.insert(id.clone(), error); continue; }
-            };
             if let Some(view) = self.browser_views.get(&id) {
                 let needs_navigation = self.browser_urls.get(&id) != Some(&url);
                 view.update(cx, |v, _| {
@@ -4901,7 +5243,17 @@ impl AppWindow {
                     bar = bar.child(div().flex_1().min_w_0().overflow_hidden().text_xs().child(url.to_owned()));
                 }
             }
-            let body: AnyElement = if let Some(view) = self.browser_views.get(&n.id) {
+            if let Some(Content::Mod { props, .. }) = n.content() {
+                let engine = crate::browser_backend::from_persisted(props).ok()
+                    .map(|e| match e {
+                        crate::browser_backend::BrowserEngine::ChromeCdp => "Chrome CDP",
+                        crate::browser_backend::BrowserEngine::WkWebView => "WKWebView",
+                    }).unwrap_or("Unavailable engine");
+                bar = bar.child(div().text_xs().text_color(c("dim")).child(engine));
+            }
+            let body: AnyElement = if let Some(view) = self.chrome_views.get(&n.id) {
+                div().size_full().child(view.clone()).into_any_element()
+            } else if let Some(view) = self.browser_views.get(&n.id) {
                 div().size_full().child(view.clone()).into_any_element()
             } else {
                 let error = self.browser_errors.get(&n.id).map(String::as_str).unwrap_or("loading browser...");
@@ -5793,6 +6145,10 @@ impl Render for AppWindow {
         let tracker = self.float_tracker(cx);
         let win_tracker = self.window_tracker(cx);
         let pane_drag = self.pane_drag_layer(cx);
+        #[cfg(target_os = "macos")]
+        let browser_approval = self.browser_approval_overlay(cx);
+        #[cfg(not(target_os = "macos"))]
+        let browser_approval: Option<AnyElement> = None;
         div()
             .id("herdr")
             .track_focus(&self.focus)
@@ -5878,6 +6234,7 @@ impl Render for AppWindow {
             .children(tracker)
             .children(win_tracker)
             .child(pane_drag)
+            .children(browser_approval)
             .child(crate::bench::frame_end())
     }
 }

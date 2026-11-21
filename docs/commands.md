@@ -175,9 +175,163 @@ End a terminal and its sub-agents.
 |---|---|
 | `terminal` | yes |
 
+## `browser.capabilities`
+
+Report browser engines actually available in this build and the new-tab default.
+
+No arguments.
+
+## `browser.list`
+
+List current Browser panes with their Herdr pane ids, URL and engine.
+
+No arguments.
+
+## `browser.snapshot`
+
+Read a bounded semantic DOM snapshot in a Chrome pane.
+
+| Argument | Required |
+|---|---|
+| `pane` | yes |
+| `mode` | no |
+| `max_nodes` | no |
+
+## `browser.query`
+
+Find bounded elements by CSS, role/name, label, text, test_id or snapshot ref.
+
+| Argument | Required |
+|---|---|
+| `pane` | yes |
+| `target` | yes |
+| `timeout_ms` | no |
+
+## `browser.inspect`
+
+Inspect an element without exposing password values.
+
+| Argument | Required |
+|---|---|
+| `pane` | yes |
+| `target` | yes |
+| `include_attributes` | no |
+
+## `browser.click`
+
+Click an element using native CDP input; risky or uncertain actions require native approval.
+
+| Argument | Required |
+|---|---|
+| `pane` | yes |
+| `target` | yes |
+| `timeout_ms` | no |
+| `wait_until` | no |
+
+## `browser.click_at`
+
+Click viewport coordinates, requiring native approval.
+
+| Argument | Required |
+|---|---|
+| `pane` | yes |
+| `x` | yes |
+| `y` | yes |
+| `snapshot_id` | no |
+
+## `browser.fill`
+
+Focus, select and enter text; sensitive fields require native approval.
+
+| Argument | Required |
+|---|---|
+| `pane` | yes |
+| `target` | yes |
+| `value` | yes |
+| `timeout_ms` | no |
+
+## `browser.type`
+
+Focus and type without clearing an editable field.
+
+| Argument | Required |
+|---|---|
+| `pane` | yes |
+| `target` | yes |
+| `text` | yes |
+| `timeout_ms` | no |
+
+## `browser.press`
+
+Dispatch a browser key; a key that could submit a form requires approval.
+
+| Argument | Required |
+|---|---|
+| `pane` | yes |
+| `key` | yes |
+| `target` | no |
+
+## `browser.scroll`
+
+Scroll the Chrome page through its CDP input channel.
+
+| Argument | Required |
+|---|---|
+| `pane` | yes |
+| `delta_y` | yes |
+| `delta_x` | no |
+| `x` | no |
+| `y` | no |
+
+## `browser.wait`
+
+Wait for a page URL, visible selector or text condition with timeout.
+
+| Argument | Required |
+|---|---|
+| `pane` | yes |
+| `condition` | yes |
+| `timeout_ms` | no |
+
+## `browser.eval`
+
+Evaluate page JavaScript only after native user approval.
+
+| Argument | Required |
+|---|---|
+| `pane` | yes |
+| `expression` | yes |
+| `timeout_ms` | no |
+
+## `browser.screenshot`
+
+Capture a PNG screenshot from Chrome to a private local path.
+
+| Argument | Required |
+|---|---|
+| `pane` | yes |
+| `scope` | no |
+
+## `browser.result`
+
+Poll an accepted Agent operation, including native approval state.
+
+| Argument | Required |
+|---|---|
+| `request_id` | yes |
+| `wait_ms` | no |
+
+## `browser.cancel`
+
+Cancel or discard a browser request; already dispatched input cannot be undone.
+
+| Argument | Required |
+|---|---|
+| `request_id` | yes |
+
 ## `browser.open`
 
-Open a native macOS WebView as a tab in the selected space (url default: https://example.com).
+Open a Browser tab. Engine may be auto, wkwebview, or chrome-cdp; unavailable explicit engines fail rather than silently changing backends.
 
 | Argument | Required |
 |---|---|
@@ -185,6 +339,7 @@ Open a native macOS WebView as a tab in the selected space (url default: https:/
 | `name` | no |
 | `space` | no |
 | `focus` | no |
+| `engine` | no |
 
 ## `browser.navigate`
 

@@ -101,7 +101,18 @@ jobs:
           git diff --exit-code -- Cargo.lock
       - name: Compile test binaries
         run: cargo test --locked --config 'profile.dev.package."*".opt-level=0' --no-run
-      - name: Rust unit and integration tests
+      - name: Require installed Google Chrome for real CDP tests
+        run: |
+          set -euo pipefail
+          binary='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
+          if [[ ! -x "$binary" ]]; then
+            echo "::error::Google Chrome must be installed on this runner for the required Chrome CDP test"
+            exit 1
+          fi
+          "$binary" --version
+      - name: Rust unit and Chrome CDP integration tests
+        env:
+          HERDR_CHROME_E2E: "1"
         run: cargo test --locked --config 'profile.dev.package."*".opt-level=0' --bins
       - name: Native macOS screenshot tests
         env:

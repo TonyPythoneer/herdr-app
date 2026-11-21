@@ -1212,15 +1212,40 @@ including a small herdr-core skill you can install with the user's permission.
 
 ### Native browser tabs (macOS fork extension)
 
-These commands use a system WKWebView inside the existing Herdr tab and pane layout;
-they do not start Chromium or a new desktop window. They are fork-specific:
+Browser tabs use Herdr's existing tab and pane layout, not a second tab
+model or desktop window. Both WKWebView and locally installed Chrome CDP
+can render on macOS. Chrome v136+ must be installed separately; a dedicated
+persistent Chrome profile is used, never Chrome's daily profile.
+An unavailable explicit engine returns an error. These commands are fork-specific:
 
-- `browser.open` — create a Browser tab: `herdr-app do browser.open '{"url":"https://example.com"}'`
-- `browser.navigate` — load an URL in a browser pane (optional `pane`).
+- `browser.capabilities` — report the available engines and new-tab default.
+- `browser.list` — report current Browser pane IDs, URLs and engine identifiers.
+- `browser.snapshot`, `browser.query`, `browser.inspect` — inspect bounded Chrome DOM data.
+- `browser.click`, `browser.click_at`, `browser.fill`, `browser.type`,
+  `browser.press`, `browser.scroll` — act on a Chrome pane with native CDP input.
+- `browser.wait` — wait for a selector, text or URL condition; `browser.eval` —
+  evaluate JavaScript after the person's explicit native approval.
+- `browser.screenshot` — save a true Chrome PNG in Herdr's private app home.
+- `browser.result` — poll a request by its unguessable ID; `browser.cancel` —
+  cancel or discard the request (dispatched input cannot be undone).
+- `browser.open` — create a Browser tab: `herdr-app do browser.open '{"url":"https://example.com","engine":"auto"}'`.
+  Optional `engine`: `auto`, `wkwebview`, or `chrome-cdp`. The `auto` setting
+  prefers a supported installed Chrome, falling back to WKWebView if unavailable.
+  The Chrome Agent CLI uses asynchronous requests. Always provide an explicit
+  `pane` from `browser.list`, then use `browser.result` to collect the result.
+  On `APPROVAL_REQUIRED`, only the real GPUI desktop confirmation can approve
+  that exact request; no CLI, mod, browser script or MCP command may approve it.
+  The Chrome Agent API is experimental. Register the same-window MCP stdio
+  server with an Agent as `herdr-app browser-mcp`; it exposes the same browser
+  commands and cannot approve its own high-risk actions. WKWebView Agent
+  parity remains unimplemented; do not claim both backends offer parity.
+- `browser.navigate` — load a URL in a browser pane (optional `pane`), preserving
+  the pane's engine and other saved properties.
 - `browser.address` — show the browser URL input dialog.
 - `browser.back` — navigate back in history.
 - `browser.forward` — navigate forward in history.
 - `browser.reload` — reload the currently selected browser pane.
 
-The browser is backed by macOS WKWebView. Browser data stays in the native
-WebKit profile. These commands operate on the desktop UI process, not herdr-core.
+Legacy browser panes without an `engine` field remain on WKWebView. Browser
+data stays in the native WebKit profile. These commands operate on the desktop
+UI process, not herdr-core.
