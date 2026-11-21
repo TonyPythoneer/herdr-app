@@ -137,6 +137,25 @@ jobs:
           ln -s /Applications dist/dmg-root/Applications
           hdiutil create -volname 'Herdr WebView' -srcfolder dist/dmg-root -format UDZO -ov dist/Herdr-Browser-macos-arm64.dmg
           test -s dist/Herdr-Browser-macos-arm64.dmg
+      - name: Verify fork release archive and produce pinned update manifest
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s scripts -p 'test_webview_release_manifest.py' -v
+          python3 scripts/webview_release_manifest.py \
+            --archive dist/herdr-app-macos-aarch64.tar.gz \
+            --dmg dist/Herdr-Browser-macos-arm64.dmg \
+            --original-icon assets/icons/Herdr.icns \
+            --output dist/latest.json
+          test -s dist/latest.json
+      - name: Upload verified updater assets (Actions artifact only)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Herdr-WebView-updater-assets
+          path: |
+            dist/herdr-app-macos-aarch64.tar.gz
+            dist/latest.json
+          if-no-files-found: error
+          retention-days: 14
       - name: Upload macOS DMG artifact
         uses: actions/upload-artifact@v4
         with:
