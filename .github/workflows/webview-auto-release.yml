@@ -50,10 +50,16 @@ jobs:
           branch_sha="$(gh api "repos/$GH_REPO/branches/feature/native-browser-tabs" --jq '.commit.sha')"
           [[ "$branch_sha" == "$sha" ]] || { echo "Integration HEAD moved; wait for its own CI"; exit 1; }
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - name: Checkout trusted release-gate tool from default branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: release-tool
+          persist-credentials: false
       - name: Checkout exact integration commit (not default branch)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ steps.sha.outputs.sha }}
+          path: integration
           persist-credentials: false
       - name: Check release prerequisites at this exact SHA
         id: gate
@@ -63,19 +69,20 @@ jobs:
           SHA: ${{ steps.sha.outputs.sha }}
         run: |
           set -euo pipefail
-          if ! test -f scripts/webview_release_manifest.py; then
+          if ! test -f integration/scripts/webview_release_manifest.py; then
             echo "eligible=false" >> "$GITHUB_OUTPUT"
             echo "Release blocked: manifest producer has not merged yet."
             exit 0
           fi
           gh api "repos/$GH_REPO/commits/$SHA/check-runs?per_page=100" > "$RUNNER_TEMP/checks.json"
-          if python3 scripts/webview_release_gate.py < "$RUNNER_TEMP/checks.json"; then
+          if python3 release-tool/scripts/webview_release_gate.py < "$RUNNER_TEMP/checks.json"; then
             echo "eligible=true" >> "$GITHUB_OUTPUT"
           else
             echo "eligible=false" >> "$GITHUB_OUTPUT"
             echo "Release blocked: required native/browser/approval E2E checks not all green."
           fi
       - name: Verify version and find successful browser packaging run
+        working-directory: integration
         if: steps.gate.outputs.eligible == 'true'
         id: assets
         env:
@@ -91,6 +98,7 @@ jobs:
           [[ "$run" =~ ^[0-9]+$ ]] || { echo "Cannot find passing macOS packaging workflow"; exit 1; }
           echo "run=$run" >> "$GITHUB_OUTPUT"
       - name: Download and independently validate release artifacts
+        working-directory: integration
         if: steps.gate.outputs.eligible == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -108,6 +116,7 @@ jobs:
             --output dist/latest.json
           cmp dist/latest.json "$RUNNER_TEMP/from-ci-latest.json"
       - name: Publish fully verified assets as stable Release (manifest last)
+        working-directory: integration
         if: steps.gate.outputs.eligible == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
