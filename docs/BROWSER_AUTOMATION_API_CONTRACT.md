@@ -97,7 +97,7 @@ The IDs and responses above are illustrative, not evidence that the commands exi
 | --- | --- | --- |
 | `browser.capabilities` | none | version/backend, supported locators, image and input capabilities, limits |
 | `browser.list` | none | panes[]: pane, url, title, loading, visible |
-| `browser.open` | url, name?, space?, focus?, engine?=`wkwebview` | opens embedded Herdr pane using selected backend and returns pane + engine; existing commands remain compatible |
+| `browser.open` | url, name?, space?, focus?, engine?=`auto` | New Tab without explicit engine chooses usable installed Chrome CDP, otherwise WKWebView; returns actual engine. Explicit choice never silently fails over. Existing saved panes missing engine remain WKWebView. |
 | `browser.navigate` | pane, url, wait_until?, timeout_ms? | navigation completion / structured error; existing command extended |
 | `browser.back/forward/reload` | pane, wait_until?, timeout_ms? | existing commands, deterministic target |
 | `browser.snapshot` | pane, mode?=a11y, max_nodes? | snapshot_id, document_id, elements/tree, truncated flag |
@@ -291,9 +291,9 @@ References: [Apple WKWebView](https://developer.apple.com/documentation/webkit/w
 
 ### Shared browser API
 
-- Engine enum: `wkwebview` | `chrome-cdp`. Optional `engine` on `browser.open` defaults to `wkwebview` for backwards compatibility with existing panes. Engine selection persists in the existing browser-pane properties; no new Herdr tab model. Add a simple engine selector to the Browser Tab creation UI.
+- Engine enum: `wkwebview` | `chrome-cdp`, plus creation-only `auto` when opening a **new** Tab. Unspecified `engine` chooses available installed `chrome-cdp` first, otherwise `wkwebview`. Older persisted panes **without** an `engine` remain WKWebView for backwards compatibility. Save selected engine in existing browser-pane properties, and display the new-Tab default in its UI selector.
 - All browser commands use the Herdr pane identifier, not Chrome target IDs exposed to an Agent. `browser.list` includes engine per pane; `browser.capabilities` lists installed/available engines, versions and capabilities. Every action response includes `engine` and `pane`. Locator, snapshot, document ID, error handling and CLI/MCP schemas are identical in both backends where supported.
-- No automatic backend substitution. Missing Chrome yields `CHROME_NOT_INSTALLED` and actionable guidance; WKWebView still works with no installed Chrome. Switching engine requires an explicit close/reopen, with a notice that page/session state may not transfer.
+- No automatic backend substitution for explicitly selected engines or already open panes. During **new Tab default resolution** only, missing/unsupported Chrome means select WKWebView. Explicit `engine: "chrome-cdp"` without Chrome yields `CHROME_NOT_INSTALLED` and actionable guidance. Switching a running pane's engine requires explicit close/reopen; session/login state may not transfer.
 - The MCP adapter and CLI use one BrowserHost and the same existing Herdr pane. They must not open an additional hidden test browser.
 
 Example (planned, **not implemented**):
@@ -329,7 +329,7 @@ herdr-app do browser.snapshot '{"pane":"p1"}'
 | Distribution | WebKit built into macOS | Detect user's installed Chrome, **never bundle/download Chrome in the released app** |
 | Session | WK profile/store | Distinct private Chrome automation profile, not default daily Chrome profile |
 
-Chrome 136+ requires a separate non-default `--user-data-dir` for remote debugging. Prefer `--remote-debugging-pipe` to avoid exposing a listening port. Chrome `Page.startScreencast` is **experimental** and might be unsuitable for interactive video or IME until verified on the actual macOS + Chrome version. It is a feasibility gate, not a presumed solved problem.
+Chrome 136+ requires a separate non-default `--user-data-dir` for remote debugging. For normal browsing, that Chrome profile is **persistent and dedicated to Herdr WebView**, remembering cookies/logins across launches without touching the daily Chrome profile; CI and unattended fixtures instead use ephemeral profiles. Prefer `--remote-debugging-pipe` to avoid exposing a listening port. Chrome `Page.startScreencast` is **experimental** and might be unsuitable for interactive video or IME until verified on the actual macOS + Chrome version. It is a feasibility gate, not a presumed solved problem.
 
 ### Release acceptance (both required)
 
@@ -343,3 +343,29 @@ Chrome 136+ requires a separate non-default `--user-data-dir` for remote debuggi
 - [ ] Engine removal requires a later **explicit user decision** with a migration path for saved pane metadata, separate PR and regression tests.
 
 **References:** [Chrome CDP Page](https://chromedevtools.github.io/devtools-protocol/tot/Page/), [Chrome CDP Input](https://chromedevtools.github.io/devtools-protocol/tot/Input/), [Chrome remote debugging security rules](https://developer.chrome.com/blog/remote-debugging-port), [Apple WKWebView](https://developer.apple.com/documentation/webkit/wkwebview).
+
+## 12. Confirmed defaults, authorization and release policy (user decision, 2026-11-21)
+
+### 12.1 New-tab engine resolution versus restoring a saved pane
+
+- **New Browser Tab:** without `engine` (also when GUI creates a Tab), detect supported locally installed Chrome. If usable, resolve to **`chrome-cdp`**; otherwise choose **`wkwebview`**. Expose `default_engine`, `available_engines` and clear availability reasons in `browser.capabilities`, and return resolved `engine` on `browser.open`. No automatic install or bundle download.
+- **Saved Browser Tab:** absent historical `engine` metadata still means **WKWebView**. Do not convert existing panes to Chrome or discard saved sessions; newly created panes persist the resolved explicit engine.
+- **Explicit engine selection:** `engine: "chrome-cdp"` and `engine: "wkwebview"` are authoritative. Unavailable Chrome reports `CHROME_NOT_INSTALLED` / `CHROME_UNSUPPORTED_VERSION`; never silently switch explicit or running panes.
+
+### 12.2 Persistent Chrome profile and isolated testing
+
+- Normal Chrome CDP browsing uses an **independent persistent, non-default Chrome user-data directory** managed by Herdr. Cookies and login state can survive Tab closure and app restart. Do not attach to daily Chrome's profile; protect with restrictive permissions, profile locking and a deliberate clear-data/logout command. Do not delete the persistent profile on Tab close.
+- CI, unattended UI automation and fixture/staging tests use isolated **ephemeral profiles** and test accounts; do not read production cookies, share the user's interactive Chrome profile or alter the original Herdr settings home. Persistent login is the **normal interactive browsing** setting, not an instruction to reuse secrets in tests.
+
+### 12.3 Agent actions on real websites — approval contract
+
+- Ordinary navigation, search, read, click, input and UI checks on real production websites are **allowed without repeated per-site approval** through either backend. Do not restrict normal Agent browsing to staging-only sites.
+- **Require explicit, action-scoped approval before high-impact or irreversible actions:** payments/purchases, bank transfers, destructive deletes/overwrites, credential/token/password export, sending messages, submission of consequential forms, changing security settings or similar actions. Approval records the origin, target, action and scope; consume/expire approvals to prevent accidental blanket reuse.
+- **One permission policy for all transports/actions.** The Agent and host-level browser policy must not permit bypass via `browser.eval`, a synthetic click, CDP access, JavaScript fetch/network requests, CLI versus MCP, or alternate commands. A browser backend cannot reliably infer arbitrary action intent from DOM/JS, so uncertain-impact actions **must request permission**, not claim automatic perfect detection. Return `APPROVAL_REQUIRED` / `PERMISSION_DENIED` with safe, actionable details and without leaking credentials.
+- Unattended test suites still default to local/staging fixtures with temporary profiles; user permission for ordinary production browsing does not permit destructive tests on live accounts.
+
+### 12.4 Automatic release after passing CI; conflicts require review
+
+- A qualifying upstream integration with **all mandatory** macOS WKWebView and Chrome CDP UI E2E, CLI/MCP, build/package/security and release checks passing, and **no unresolved integration conflicts**, is **automatically released** without routine manual approval. Keep manifest-last atomic publish and fork-only feed.
+- **Merge/rebase/incompatible dependency conflicts require human review** before integration/release. Stop automatic promotion, keep the previous published build intact and create/update a deduplicated GitHub Issue with PR, failure context and logs.
+- Required CI tests that fail, are unavailable or are skipped **also block publication** and create a diagnostic Issue. Do not mistake failing CI for permission to force a release. User will later decide if either browser engine should be removed.
