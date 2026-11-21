@@ -1,0 +1,44 @@
+name: upstream-sync
+
+on:
+  schedule:
+    # Monday 03:23 UTC / 11:23 Taiwan. Scheduled workflows require default branch.
+    - cron: '23 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: herdr-webview-weekly-upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  propose-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout default branch automation (source of truth)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: sync-tool
+          persist-credentials: false
+      - name: Check automation unit tests
+        run: python3 -m unittest discover -s sync-tool/scripts -p 'test_upstream_sync.py' -v
+      - name: Checkout maintained browser integration branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: feature/native-browser-tabs
+          fetch-depth: 0
+          path: integration
+          persist-credentials: true
+      - name: Detect stable upstream tag and propose safe merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          INTEGRATION_BRANCH: feature/native-browser-tabs
+        run: python3 sync-tool/scripts/upstream_sync.py integration
