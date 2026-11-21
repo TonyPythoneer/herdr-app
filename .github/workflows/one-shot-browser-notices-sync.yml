@@ -36,7 +36,7 @@ jobs:
 
       - name: Install official cargo-about 0.9.3
         shell: bash
-        run: cargo install --locked cargo-about --version 0.9.3
+        run: cargo install --locked cargo-about --version 0.9.3 --features cli
 
       - name: Regenerate complete third-party license notices
         shell: bash
