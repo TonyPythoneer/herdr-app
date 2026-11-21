@@ -47,7 +47,8 @@ jobs:
           test -s THIRD-PARTY-NOTICES
           grep -q "gpui-wry" THIRD-PARTY-NOTICES
           grep -q "lb-wry" THIRD-PARTY-NOTICES
-          git diff --check
+          # Preserve upstream license text verbatim, including source whitespace.
+          # A trailing-space check is inappropriate for third-party legal notices.
           git diff --stat -- THIRD-PARTY-NOTICES
 
       - name: Commit reviewed generator output to PR branch
