@@ -94,10 +94,11 @@ jobs:
           restore-keys: browser-rust-v2-macos-aarch64-rust195-zig016-
       - name: Restore vendored source timestamps
         run: scripts/ci-sources restore
-      # TODO(PR 0b): commit a complete browser-compatible Cargo.lock.
-      # Until then the existing branch requires this resolution step.
-      - name: Resolve lockfile for browser dependencies
-        run: cargo metadata --format-version 1 > /dev/null
+      - name: Verify committed browser Cargo.lock is complete
+        run: |
+          set -euo pipefail
+          cargo metadata --locked --format-version 1 > /dev/null
+          git diff --exit-code -- Cargo.lock
       - name: Compile test binaries
         run: cargo test --locked --config 'profile.dev.package."*".opt-level=0' --no-run
       - name: Rust unit and integration tests
