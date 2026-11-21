@@ -17,10 +17,10 @@ The existing fork uses `gpui_wry` with `lb-wry = 0.53.3`, whose `evaluate_script
 
 ## 2. Hard product requirements
 
-1. Browser lives **inside a real Herdr Tab/Pane**, never in Safari/Chrome/external window.
+1. Browser lives **inside a real Herdr Tab/Pane** via either native WKWebView or a GPUI-rendered screen stream from a locally installed headless Chrome CDP Target. No extra visible browser window; Chrome is a separate background process when selected.
 2. Agents can complete `open → snapshot → locate → click/fill/type → wait → eval → screenshot` entirely through the existing `herdr-app do` control path.
 3. Use the **Native Pane Adapter / BrowserHost** from Workstream E; do not implement a second hidden browser or separate tab model.
-4. The external command/JSON contract is **versioned and testable**. `browser.capabilities` returns `{"api_version":"1.0","backend":"wkwebview-macos",...}`. Breaking changes require a new major version or explicit capability-negotiation path.
+4. The external command/JSON contract is **versioned and testable**. `browser.capabilities` returns engine availability and selected pane engine, e.g. `{"api_version":"1.0","engine":"wkwebview", "available_engines":["wkwebview","chrome-cdp"],...}` (illustrative, Chrome may be unavailable). Breaking changes require a new major version or explicit capability-negotiation path.
 5. Use **explicit pane IDs** for every Agent command that reads or mutates a page (except `browser.list` / `browser.open` / `browser.capabilities`). Avoid selecting an arbitrary active pane when multiple agents run.
 6. Keep the app named **Herdr WebView**, original icon and original `~/.config/herdr-app` configuration. Normal original-vs-fork single-instance restrictions apply.
 7. Agent automation must be a **mandatory release gate** and must survive upstream Herdr merges.
@@ -40,7 +40,7 @@ herdr-app do browser.eval '{"pane":"pane_1","expression":"document.title"}'
 herdr-app do browser.screenshot '{"pane":"pane_1","scope":"viewport"}'
 ```
 
-The IDs and responses above are illustrative, not evidence that the commands exist yet. Preserve the established `browser.open/navigate/back/forward/reload` names and behavior; add new commands without silently changing old call sites. The adapter exposes a **local MCP stdio tool server** as a separate optional executable backed by the *same* Herdr control socket so MCP-capable Agents can discover tools via `tools/list`. Implement that adapter before declaring cross-Agent MCP support; it must not spawn another browser. Document how to register it in supported Agent CLIs. Both transports use the same validated backend operation handlers and response schemas.
+The IDs and responses above are illustrative, not evidence that the commands exist yet. Preserve the established `browser.open/navigate/back/forward/reload` names and behavior; add new commands without silently changing old call sites. The adapter exposes a **local MCP stdio tool server** as a separate optional executable backed by the *same* Herdr control socket so MCP-capable Agents can discover tools via `tools/list`. Implement that adapter before declaring cross-Agent MCP support; it must not spawn a separate unrelated browser session; it connects to the already selected Herdr pane, whose Chrome backend may itself manage a headless Chrome process. Document how to register it in supported Agent CLIs. Both transports use the same validated backend operation handlers and response schemas.
 
 ### Envelope: request / completed / accepted / error
 
@@ -97,7 +97,7 @@ The IDs and responses above are illustrative, not evidence that the commands exi
 | --- | --- | --- |
 | `browser.capabilities` | none | version/backend, supported locators, image and input capabilities, limits |
 | `browser.list` | none | panes[]: pane, url, title, loading, visible |
-| `browser.open` | url, name?, space?, focus? | opens **embedded** pane, returns pane ID; existing command |
+| `browser.open` | url, name?, space?, focus?, engine?=`wkwebview` | opens embedded Herdr pane using selected backend and returns pane + engine; existing commands remain compatible |
 | `browser.navigate` | pane, url, wait_until?, timeout_ms? | navigation completion / structured error; existing command extended |
 | `browser.back/forward/reload` | pane, wait_until?, timeout_ms? | existing commands, deterministic target |
 | `browser.snapshot` | pane, mode?=a11y, max_nodes? | snapshot_id, document_id, elements/tree, truncated flag |
@@ -169,7 +169,7 @@ The second fragment is the `browser.click` schema **fragment**; implementations 
 ### Snapshot, JavaScript and artifact policies
 
 - `browser.eval` executes only in the active **web page's origin**. It is explicitly called by the trusted local Agent; websites cannot invoke it as a privileged native hook. JSON round-trip must distinguish JS exception from undefined/non-JSON/circular value and cap output.
-- Screenshot MUST come from the embedded WKWebView's actual rendered pixels (e.g. WKWebView `takeSnapshot(with:completionHandler:)`), not GPUI's framebuffer alone. Output PNG to a private temporary directory (owner-only permissions), do not allow arbitrary writes, return path, dimensions, MIME type, SHA256/size when practical, and remove stale artifacts.
+- Screenshot MUST come from the selected page backend: WKWebView native `takeSnapshot(with:completionHandler:)` or the Chrome target's `Page.captureScreenshot`. Never use GPUI-only framebuffer output or an old Chrome screencast frame as test evidence. Output PNG to a private temporary directory (owner-only permissions), do not allow arbitrary writes, return path, dimensions, MIME type, SHA256/size when practical, and remove stale artifacts.
 - Starting defaults (tunable after benchmarking): 10s action timeout, 30s maximum, ~1,000 snapshot nodes, ~512KiB text result cap and bounded PNG dimensions; report `truncated` rather than silently returning partial results. Do not include password values in snapshot or logs.
 
 ### Safety
@@ -212,10 +212,10 @@ Error results must include a human-readable message and `retryable` boolean; nev
 ## 9. Implementation sequencing
 
 1. **API contract and backend**: typed request/response/locator definitions, schema generation, stable pane/document identity, error codes.
-2. **WKWebView bridge**: asynchronous eval + result lifecycle, snapshot/query/inspect, native input implementation, native PNG capture, wait/cancel.
+2. **Two backend implementations in parallel**: existing WKWebView bridge and installed-Chrome-CDP adapter (including GPUI screencast renderer), each providing async eval/snapshot/query/inspect/input/native screenshots/wait/cancel.
 3. **Herdr CLI**: command registration and working local socket calls; no app UI deadlocks; same tests across multiple panes.
-4. **MCP stdio bridge**: expose backend contracts as MCP tools without starting a separate browser; add Agent CLI configuration examples.
-5. **CI promotion**: real macOS fixture tests and security/release gates must pass before the release can claim Agent-controllable WebView.
+4. **MCP stdio bridge**: expose the same Herdr pane backend through MCP; must not start a second unrelated browser, but the selected Chrome engine may own a managed background Chrome process. Add Agent CLI configuration examples.
+5. **CI promotion**: both backend suites (real macOS WKWebView and headless local Chrome/CDP shown inside GPUI), shared Agent API and security gates must pass before stable release.
 
 **No assumptions of pre-existing support:** v1.0 is a normative *design target*. Record actual implementation status per command in the PR and only label commands `supported` once exercised through the shipped Agent interface on macOS.
 
@@ -223,8 +223,8 @@ Error results must include a human-readable message and `retryable` boolean; nev
 
 ### 10.1 Protocol compatibility: precise commitment
 
-- **What is promised:** Playwright/Chrome-DevTools-like **Agent ergonomics** through a first-party Herdr `browser.*` JSON contract, command discovery and local MCP stdio tools controlling the **already displayed WKWebView**.
-- **What is not promised:** raw Chrome DevTools Protocol (CDP) WebSocket connectivity or drop-in support for `chromium.connectOverCDP()` / `playwright.connectOverCDP()`. WKWebView uses WebKit/JavaScriptCore, not Chromium CDP. WebKit Inspector/remote inspector does not mean stock WKWebView supports the full Playwright protocol or Chrome-only domains. Playwright's shipped WebKit is patched; even Playwright's internal stock-WebKit experiments are not a verified general macOS WKWebView driver.
+- **What is promised for the WKWebView engine:** Playwright/Chrome-DevTools-like **Agent ergonomics** through a first-party Herdr `browser.*` API controlling the already displayed WKWebView; the separate `chrome-cdp` engine implements the same external API while using real CDP internally.
+- **What is not promised for WKWebView:** raw Chrome DevTools Protocol (CDP) WebSocket connectivity or drop-in support for `chromium.connectOverCDP()` / `playwright.connectOverCDP()`. WKWebView uses WebKit/JavaScriptCore, not Chromium CDP. The optional Chrome engine uses native CDP internally, but Herdr's CLI/MCP stays custom. WebKit Inspector/remote inspector does not mean stock WKWebView supports the full Playwright protocol or Chrome-only domains. Playwright's shipped WebKit is patched; even Playwright's internal stock-WebKit experiments are not a verified general macOS WKWebView driver.
 - **Technical feasibility gate (P0, before large implementation):** a minimal proof of concept must operate the *existing visible* GPUI child WKWebView through `herdr-app do`: JS evaluate-with-result, stable DOM querying, form input/click using a verified input path, a native WKWebView PNG capture, and post-action assertion. Measure Mac permissions and native-event `isTrusted` instead of assuming success. If native input cannot be made reliable with supported macOS APIs and the existing architecture, block the release and document the compatibility limitation; **do not claim Playwright-grade input automation based solely on `element.click()`.**
 
 ### 10.2 Two distinct UI surfaces and test scope
@@ -236,7 +236,7 @@ Error results must include a human-readable message and `retryable` boolean; nev
 | OS dialogs, Safari/Chrome or arbitrary external apps | Not supported by the WebView browser API | Separate native/OS automation only if deliberately scoped; never imply the browser API tests it |
 | Chrome-specific browser behavior | Not directly | Separate Chromium testing only if explicitly desired; not part of “same embedded WebView” guarantee |
 
-Mandatory tests target both: (A) **web-app behavior** in the real embedded WKWebView; (B) **native container integration** (focus, z-order, resize, split, close). Both tests run against the shipped Herdr WebView app, not a second hidden browser or Safari.
+Mandatory tests target both: (A) **web-app behavior** in the real embedded WKWebView; (B) **native container integration** (focus, z-order, resize, split, close). Both tests run against the shipped Herdr WebView app. The WK engine uses native WKWebView, while Chrome mode uses a managed separate headless Chrome process whose screen is streamed into the GPUI Tab, not a separate visible browser window.
 
 ### 10.3 Risk register and mitigations (normative)
 
@@ -276,10 +276,70 @@ API extension: `browser.assert` is recommended to explicitly support UI test pos
 ### 10.6 Decisions assumed unless the user requests otherwise
 
 - **First release:** test and automate web UI *inside* Herdr; also verify the native Herdr container's integration using macOS native UI testing (not webpage JS).
-- **Priority:** correctness and reproducibility over raw CDP compatibility. Do not implement a fake CDP server.
+- **Priority:** correctness and reproducibility over pretending WKWebView has CDP. Chrome backend uses real Chrome CDP internally; do not implement a fake CDP server.
 - **Test state:** isolated fixture/staging profile by default; production sessions not used in unattended UI tests.
 - **Manual/native permissions:** no Apple Developer certificate required for packaging; this does **not** imply Accessibility/TCC input permissions are automatically granted.
 - **Approval:** ordinary local site exploration and staging UI checks can run unattended; high-impact transactions on live accounts require explicit approval by the Agent's applicable permission layer.
 
 References: [Apple WKWebView](https://developer.apple.com/documentation/webkit/wkwebview), [WKSnapshotConfiguration](https://developer.apple.com/documentation/webkit/wksnapshotconfiguration), [Playwright MCP snapshots](https://playwright.dev/mcp/snapshots), [Playwright browsers](https://playwright.dev/docs/browsers), [WebKit contributor notes on WebDriver BiDi and UI testing](https://docs.webkit.org/Other/Contributor%20Meetings/ContributorMeeting2025.html), [Apple inspectable WebViews](https://webkit.org/blog/13936/enabling-the-inspection-of-web-content-in-apps/).
 
+
+
+## 11. Dual-engine extension — two backends retained (2026-11-21)
+
+**Normative architecture:** [DUAL_BROWSER_BACKEND_PLAN.md](DUAL_BROWSER_BACKEND_PLAN.md). **Both strategies must be developed, shipped, and tested in parallel. Do not remove either one unless the user later explicitly decides.** Earlier WKWebView-only language in sections 1–10 applies to that backend specifically; where requirements conflict, this dual-engine extension controls.
+
+### Shared browser API
+
+- Engine enum: `wkwebview` | `chrome-cdp`. Optional `engine` on `browser.open` defaults to `wkwebview` for backwards compatibility with existing panes. Engine selection persists in the existing browser-pane properties; no new Herdr tab model. Add a simple engine selector to the Browser Tab creation UI.
+- All browser commands use the Herdr pane identifier, not Chrome target IDs exposed to an Agent. `browser.list` includes engine per pane; `browser.capabilities` lists installed/available engines, versions and capabilities. Every action response includes `engine` and `pane`. Locator, snapshot, document ID, error handling and CLI/MCP schemas are identical in both backends where supported.
+- No automatic backend substitution. Missing Chrome yields `CHROME_NOT_INSTALLED` and actionable guidance; WKWebView still works with no installed Chrome. Switching engine requires an explicit close/reopen, with a notice that page/session state may not transfer.
+- The MCP adapter and CLI use one BrowserHost and the same existing Herdr pane. They must not open an additional hidden test browser.
+
+Example (planned, **not implemented**):
+
+~~~bash
+herdr-app do browser.open '{"url":"https://example.com","engine":"chrome-cdp"}'
+herdr-app do browser.snapshot '{"pane":"p1"}'
+~~~
+
+~~~json
+{
+  "api_version":"1.0",
+  "request_id":"r1",
+  "ok":true,
+  "status":"completed",
+  "pane":"p1",
+  "engine":"chrome-cdp",
+  "document_id":"d1",
+  "url":"https://example.com/",
+  "result":{"title":"Example Domain"}
+}
+~~~
+
+### Backend-specific facts
+
+| Contract dimension | WKWebView | Local Chrome/CDP |
+| --- | --- | --- |
+| Display | Real macOS WKWebView child inside GPUI Tab | CDP `Page.startScreencast` → decoded frames → GPUI image/texture; Chrome remains headless |
+| DOM/JS | WebKit JS callback bridge | CDP Runtime/DOM/Accessibility |
+| Input | Verified macOS native input, permissions may be required | GPUI event mapped to Chrome viewport then CDP Input |
+| Screenshots | WK native `takeSnapshot` | CDP `Page.captureScreenshot` from target, not screencast-frame cache |
+| Viewport/resize | Native view bounds | CDP Emulation metrics + coordinate mapping |
+| Distribution | WebKit built into macOS | Detect user's installed Chrome, **never bundle/download Chrome in the released app** |
+| Session | WK profile/store | Distinct private Chrome automation profile, not default daily Chrome profile |
+
+Chrome 136+ requires a separate non-default `--user-data-dir` for remote debugging. Prefer `--remote-debugging-pipe` to avoid exposing a listening port. Chrome `Page.startScreencast` is **experimental** and might be unsuitable for interactive video or IME until verified on the actual macOS + Chrome version. It is a feasibility gate, not a presumed solved problem.
+
+### Release acceptance (both required)
+
+- [ ] Same browser automation fixture in WKWebView and Chrome engines: open → snapshot → locate → click/fill/type → assert DOM → navigate → evaluate → screenshot → close via Herdr CLI **and** MCP.
+- [ ] Chrome integration P0: installed Chrome detected; headless CDP start, continuous screencast and ACK, images painted in a real GPUI Tab, mouse/wheel/keyboard and IME behavior verified. No extra visible Chrome window. No Chrome binaries in DMG.
+- [ ] WK integration P0: actual embedded WKView rendering, trusted/native input proof, JS results, native PNG snapshot, overlay/focus tests. Existing WK route is not removed.
+- [ ] Engine-identity and session-isolation tests: no accidental cross-pane/engine commands, no stale document action, controlled crash/close, no silent fallback.
+- [ ] Real macOS GUI test of Herdr's container, not merely web DOM assertions, for split/resize, tab focus and controls with both renderers.
+- [ ] CI runs mandatory macOS E2E for **both** engines; missing Chrome on CI runner must be resolved by CI provisioning (not shipping Chrome), not by skipping Chrome tests. Failing/skipped mandatory backend blocks release and opens or updates a diagnostic Issue.
+- [ ] Chrome-less user Mac: packaged Herdr opens normally and WKWebView works; Chrome selection explains unavailability. App continues using original Herdr settings and fork-only updater.
+- [ ] Engine removal requires a later **explicit user decision** with a migration path for saved pane metadata, separate PR and regression tests.
+
+**References:** [Chrome CDP Page](https://chromedevtools.github.io/devtools-protocol/tot/Page/), [Chrome CDP Input](https://chromedevtools.github.io/devtools-protocol/tot/Input/), [Chrome remote debugging security rules](https://developer.chrome.com/blog/remote-debugging-port), [Apple WKWebView](https://developer.apple.com/documentation/webkit/wkwebview).
