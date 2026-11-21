@@ -1,0 +1,220 @@
+# Herdr WebView — Browser Automation API Contract v1.0 (design specification)
+
+> **Status: SPECIFICATION / NOT IMPLEMENTED.** Required for the first AI-operable WebView release. Source of truth for Agent-facing browser commands, compatibility, behavior, failure semantics and release tests. Tracks [Issue #1](https://github.com/TonyPythoneer/herdr-webview/issues/1). This is a **Herdr-defined contract informed by industry precedents**, not an implementation of Playwright, CDP or the W3C WebDriver BiDi protocol.
+
+## 1. Basis: what is established versus custom
+
+| Reference | Established design used by Herdr | What Herdr must NOT claim |
+| --- | --- | --- |
+| [Playwright MCP capabilities](https://playwright.dev/mcp/capabilities), [interaction](https://playwright.dev/mcp/tools/interaction), [snapshots](https://playwright.dev/mcp/snapshots) | Snapshot → element ref → click/type → new snapshot; wait, evaluate, screenshot; optional vision tools | That `browser.*` is Playwright MCP or that using JS click is equivalent to a genuine user click |
+| [Chrome DevTools MCP tools](https://github.com/ChromeDevTools/chrome-devtools-mcp/blob/main/docs/tool-reference.md) | List/select page, snapshot UID, fill, click, evaluate, screenshot, structured errors | That an Apple WKWebView implements Chrome DevTools Protocol |
+| [Playwright locators](https://playwright.dev/docs/locators) | Prefer role/name and label; allow text/test ID/CSS; wait for visible/enabled/stable and require unique target | That raw CSS selectors are the most reliable default |
+| [WebDriver BiDi](https://www.w3.org/TR/2026/WD-webdriver-bidi-20260903/) | Separate context/document identity, input actions, script evaluation, navigation and screenshot lifecycle | That the fork fully implements W3C WebDriver BiDi |
+| [MCP tools specification](https://modelcontextprotocol.io/specification/2026-07-28/server/tools) | Discoverable tools with explicit `inputSchema` / `outputSchema`, structured results and tool errors | That a bare Herdr CLI command automatically becomes an MCP tool |
+| [Apple WKWebView snapshot API](https://developer.apple.com/documentation/webkit/wkwebview) | Capture the actual native WKWebView pixels | That GPUI screenshot tests alone prove WKWebView pixels are present |
+
+The existing fork uses `gpui_wry` with `lb-wry = 0.53.3`, whose `evaluate_script_with_callback` provides a JSON-serialized result. Verify all macOS behavior against the **pinned versions**, not documentation for a newer package: [longbridge/wry source](https://github.com/longbridge/wry/blob/dev/src/lib.rs).
+
+## 2. Hard product requirements
+
+1. Browser lives **inside a real Herdr Tab/Pane**, never in Safari/Chrome/external window.
+2. Agents can complete `open → snapshot → locate → click/fill/type → wait → eval → screenshot` entirely through the existing `herdr-app do` control path.
+3. Use the **Native Pane Adapter / BrowserHost** from Workstream E; do not implement a second hidden browser or separate tab model.
+4. The external command/JSON contract is **versioned and testable**. `browser.capabilities` returns `{"api_version":"1.0","backend":"wkwebview-macos",...}`. Breaking changes require a new major version or explicit capability-negotiation path.
+5. Use **explicit pane IDs** for every Agent command that reads or mutates a page (except `browser.list` / `browser.open` / `browser.capabilities`). Avoid selecting an arbitrary active pane when multiple agents run.
+6. Keep the app named **Herdr WebView**, original icon and original `~/.config/herdr-app` configuration. Normal original-vs-fork single-instance restrictions apply.
+7. Agent automation must be a **mandatory release gate** and must survive upstream Herdr merges.
+
+## 3. CLI / command transport
+
+Existing surface is `herdr-app do <command> '<JSON arguments>'`, registered in `src/commands.rs` and carried by the local Unix control socket in `src/control.rs`. The CLI output is one JSON object on stdout; diagnostic logs go to stderr. Nonzero CLI exit on an operation error. No globally exposed HTTP server.
+
+Examples **after implementation**:
+
+```bash
+herdr-app do browser.open '{"url":"http://localhost:3210"}'
+herdr-app do browser.snapshot '{"pane":"pane_1","mode":"a11y"}'
+herdr-app do browser.click '{"pane":"pane_1","target":{"role":"button","name":"Search"}}'
+herdr-app do browser.fill '{"pane":"pane_1","target":{"label":"Search"},"value":"Herdr"}'
+herdr-app do browser.eval '{"pane":"pane_1","expression":"document.title"}'
+herdr-app do browser.screenshot '{"pane":"pane_1","scope":"viewport"}'
+```
+
+The IDs and responses above are illustrative, not evidence that the commands exist yet. Preserve the established `browser.open/navigate/back/forward/reload` names and behavior; add new commands without silently changing old call sites. The adapter exposes a **local MCP stdio tool server** as a separate optional executable backed by the *same* Herdr control socket so MCP-capable Agents can discover tools via `tools/list`. Implement that adapter before declaring cross-Agent MCP support; it must not spawn another browser. Document how to register it in supported Agent CLIs. Both transports use the same validated backend operation handlers and response schemas.
+
+### Envelope: request / completed / accepted / error
+
+```json
+{
+  "api_version": "1.0",
+  "request_id": "req_01",
+  "ok": true,
+  "status": "completed",
+  "pane": "pane_1",
+  "document_id": "doc_7",
+  "url": "https://example.com/",
+  "result": { "title": "Example Domain" }
+}
+```
+
+- Every reply must carry `api_version`, `request_id`, `ok` and `status`. For page actions, include `pane` and current `document_id` when available. Results are JSON-serializable and size bounded.
+- `status` is `completed`, `accepted` or `failed`. `accepted` means **not yet completed** and must include `request_id`; it is not represented as success of the browser action. `browser.result` looks up or waits briefly for the final result; `browser.cancel` cancels an operation. MCP adapter may await pending operations asynchronously without hanging Herdr's UI.
+- Error example:
+
+```json
+{
+  "api_version": "1.0",
+  "request_id": "req_02",
+  "ok": false,
+  "status": "failed",
+  "pane": "pane_1",
+  "error": {
+    "code": "ELEMENT_NOT_FOUND",
+    "message": "No visible button named Search",
+    "retryable": true,
+    "details": { "target": { "role": "button", "name": "Search" } }
+  }
+}
+```
+
+- For transport failures, use nonzero CLI exit and a structured response when possible. An MCP tool maps operation failures to `isError: true` and returns the structured payload in `structuredContent` plus a portable text representation. Respect the negotiated MCP specification version.
+- Request IDs must be generated by the host if absent, scoped to one instance, collision-safe, and must never be reused for a different operation. Pending operations must have bounded retention and cancellation.
+
+## 4. Browser identity, snapshots and targets
+
+- `pane`: stable Herdr Pane ID while the pane exists. `browser.list` reveals IDs and URLs/titles; do **not** equate app tab index with identity.
+- `document_id`: changes on full navigation/reload; helps prevent an old command acting on a new document.
+- `snapshot_id`: identifies a fresh observation of the specified pane/document. `ref` values are valid **only for that snapshot** and may become stale on meaningful DOM mutation/navigation; return `STALE_ELEMENT` and require a fresh snapshot, not silent fallback to another button.
+- Locator alternatives, **exactly one** of: `{"ref":"e12","snapshot_id":"snap_5"}`, `{"role":"button","name":"Search","exact":true}`, `{"label":"Search"}`, `{"text":"Continue","exact":true}`, `{"test_id":"search-btn"}`, `{"css":"button[type=submit]"}`. For explicit target coordinate use `{"x":150,"y":220}` only with `browser.click_at` and a current viewport snapshot/screenshot. All coordinates are **WebView viewport CSS pixels**, not screen pixels, and must be converted correctly for display scaling.
+- Prioritize semantic role/name or label; then snapshot ref, test ID, text and CSS as appropriate. Any locator matching multiple elements for a destructive/mutating action returns `AMBIGUOUS_TARGET` unless disambiguated; no implicit first match.
+- `browser.snapshot` returns a compact **accessibility-oriented** tree with roles, names, labels, text, states, bounds for interactable elements and refs, plus `snapshot_id`/`document_id`. Implement semantic DOM/ARIA name extraction accurately enough for covered fixtures. **Do not claim full native accessibility-tree parity** if implemented using DOM extraction; describe backend capability explicitly.
+- `browser.inspect` returns focused DOM details for a target (tag, selected attributes, text, value where permitted, state, bounds). `browser.query` resolves a locator to bounded matching elements/refs; prevent full DOM/HTML exfiltration by default.
+- A page navigation or detach invalidates all refs for that old document. SPA transitions and significant DOM updates must invalidate or revalidate refs. Stale refs must never be redirected to a different element.
+
+## 5. v1.0 command table (all required unless identified as compatibility)
+
+| Command | Request parameters | Result / behavior |
+| --- | --- | --- |
+| `browser.capabilities` | none | version/backend, supported locators, image and input capabilities, limits |
+| `browser.list` | none | panes[]: pane, url, title, loading, visible |
+| `browser.open` | url, name?, space?, focus? | opens **embedded** pane, returns pane ID; existing command |
+| `browser.navigate` | pane, url, wait_until?, timeout_ms? | navigation completion / structured error; existing command extended |
+| `browser.back/forward/reload` | pane, wait_until?, timeout_ms? | existing commands, deterministic target |
+| `browser.snapshot` | pane, mode?=a11y, max_nodes? | snapshot_id, document_id, elements/tree, truncated flag |
+| `browser.query` | pane, target, timeout_ms? | matching elements, counts; bounded output |
+| `browser.inspect` | pane, target, include_attributes? | sanitized DOM element details |
+| `browser.click` | pane, target, timeout_ms?, wait_until? | focus/scroll into view/actionability checks, user-like click, result |
+| `browser.click_at` | pane, x, y, snapshot_id? | actual native pointer input fallback for canvas/visual-only targets |
+| `browser.fill` | pane, target, value, timeout_ms? | focus + replacement + input/change semantics; no echo of secrets |
+| `browser.type` | pane, target, text, timeout_ms? | keyboard typing, distinct from field replace |
+| `browser.press` | pane, key, target? | Enter/Tab/keyboard combinations |
+| `browser.scroll` | pane, x?, y?, delta_y, delta_x? | WebView scrolling |
+| `browser.wait` | pane, condition: {url?, selector?, text?, state?}, timeout_ms? | waits for navigation/selector/visibility; explicit timeout |
+| `browser.eval` | pane, expression, timeout_ms?, await_promise? | executes JS in page origin; returns JSON value or exception |
+| `browser.screenshot` | pane, scope?=viewport | native WKWebView PNG artifact path and width/height |
+| `browser.result` | request_id, wait_ms? | final result or still-pending status |
+| `browser.cancel` | request_id | cancellation acknowledgement; completion cannot be delivered to another pane |
+
+Optional improvements AFTER the above is actually working: `browser.fill_form` (multi-field form in one call), hover, drag/drop, select_option, dialog handling, network/console logs, full-page/element screenshots. These may be promoted into v1.0 if safely feasible, but cannot substitute for mandatory commands.
+
+### Schema fragments (normative examples, validate against JSON Schema in code)
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/TonyPythoneer/herdr-webview/blob/feature/native-browser-tabs/docs/BROWSER_AUTOMATION_API_CONTRACT.md#target",
+  "title": "HerdrBrowserTarget",
+  "oneOf": [
+    { "type": "object", "properties": { "ref": { "type": "string" }, "snapshot_id": { "type": "string" } }, "required": ["ref", "snapshot_id"], "additionalProperties": false },
+    { "type": "object", "properties": { "role": { "type": "string" }, "name": { "type": "string" }, "exact": { "type": "boolean" } }, "required": ["role", "name"], "additionalProperties": false },
+    { "type": "object", "properties": { "label": { "type": "string" } }, "required": ["label"], "additionalProperties": false },
+    { "type": "object", "properties": { "text": { "type": "string" }, "exact": { "type": "boolean" } }, "required": ["text"], "additionalProperties": false },
+    { "type": "object", "properties": { "test_id": { "type": "string" } }, "required": ["test_id"], "additionalProperties": false },
+    { "type": "object", "properties": { "css": { "type": "string" } }, "required": ["css"], "additionalProperties": false }
+  ]
+}
+```
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "pane": { "type": "string", "minLength": 1 },
+    "target": { "$ref": "#/$defs/HerdrBrowserTarget" },
+    "timeout_ms": { "type": "integer", "minimum": 100, "maximum": 30000 }
+  },
+  "required": ["pane", "target"],
+  "additionalProperties": false
+}
+```
+
+The second fragment is the `browser.click` schema **fragment**; implementations must embed the target definition in `$defs` and generate machine-validated `inputSchema` and `outputSchema` for **every** command from shared typed definitions. The docs' version number is not the MCP protocol version.
+
+## 6. Required behavior and technical boundaries
+
+### Native input versus DOM scripting
+
+- For `browser.click` and `browser.type`, prefer verified user-equivalent native WKWebView/NSView input and actionability checks (visible, enabled, attached, stable, in viewport). A JavaScript call such as `element.click()` alone is NOT equivalent to trusted mouse/keyboard input and may fail on sites requiring trusted events.
+- Implement a tested native pointer/keyboard dispatch path or a documented reliable WebKit automation route **without** forcing an external browser or blindly switching GPUI engine. Include a deterministic fixture that inspects event order and `event.isTrusted` where applicable; never falsely report that the click is trusted.
+- A canvas or non-DOM control requires `browser.screenshot` + `browser.click_at`; coordinate clicks must be bound to the right pane and updated viewport geometry.
+- Cross-origin iframe, closed shadow DOM, CAPTCHA, OS permission prompts, and site-specific anti-bot restrictions are **not promised as universally automatable**. Fail visibly with capability/permission errors; do not silently claim success.
+
+### Nonblocking async bridge and lifecycle
+
+- `lb-wry` has callback-capable script evaluation; integrate callback → request result using a queue/state machine, no UI-thread synchronous wait. Existing `src/control.rs` has a ~5s normal server reply timeout and ~35s CLI read timeout: **do not pretend that a 30s page wait can run synchronously in the current socket without plumbing changes**.
+- On accepted async operations, return request_id promptly; a local MCP stdio adapter may repeatedly resolve the result until complete or timeout. Bound pending operations per pane, serialize conflicting actions and cancel on tab close, navigation, app quit or document identity change.
+- Avoid per-page IPC exposing privileged native operations. If using Wry `with_ipc_handler`, any page-originated message is untrusted: verify origin, capabilities, authentication/binding and enforce no native filesystem/Agent privilege. Prefer host-initiated eval callbacks without injecting privileged bridges.
+- Show real WebView content when hidden/re-shown, restore focus properly, and test that dialogs, menus and overlays appear above the native web content.
+
+### Snapshot, JavaScript and artifact policies
+
+- `browser.eval` executes only in the active **web page's origin**. It is explicitly called by the trusted local Agent; websites cannot invoke it as a privileged native hook. JSON round-trip must distinguish JS exception from undefined/non-JSON/circular value and cap output.
+- Screenshot MUST come from the embedded WKWebView's actual rendered pixels (e.g. WKWebView `takeSnapshot(with:completionHandler:)`), not GPUI's framebuffer alone. Output PNG to a private temporary directory (owner-only permissions), do not allow arbitrary writes, return path, dimensions, MIME type, SHA256/size when practical, and remove stale artifacts.
+- Starting defaults (tunable after benchmarking): 10s action timeout, 30s maximum, ~1,000 snapshot nodes, ~512KiB text result cap and bounded PNG dimensions; report `truncated` rather than silently returning partial results. Do not include password values in snapshot or logs.
+
+### Safety
+
+- Restrict the automation channel to the same trusted local user/process boundary as Herdr CLI; enforce filesystem/socket permissions and do not expose a public listening network port.
+- Web page DOM/HTML and screenshots are **untrusted observations**, not instructions to be executed by an Agent. No automatic cookie/password export. Sensitive/irreversible actions such as purchases, transfer, deleting data or sending a message require the Agent's applicable user-approval gate; never have the browser backend bypass it.
+- Validate `http(s)` URL policy, file paths, output sizes and per-pane focus. Separate network document access from privileged native application APIs.
+
+## 7. Error code contract (minimum)
+
+| Error code | Meaning | Retry guidance |
+| --- | --- | --- |
+| `INVALID_ARGUMENT` | Schema/locator/command input invalid | Fix arguments |
+| `PANE_NOT_FOUND` / `PANE_CLOSED` | Pane missing or detached | Refresh browser.list |
+| `DOCUMENT_CHANGED` / `STALE_ELEMENT` | Ref belongs to another document/snapshot or is stale | Take new snapshot |
+| `ELEMENT_NOT_FOUND` | No locator match within deadline | Check page/wait/re-snapshot |
+| `AMBIGUOUS_TARGET` | Multiple matches when uniqueness required | Use role/name/ref or more specific selector |
+| `NOT_INTERACTABLE` / `OBSCURED` | Hidden, disabled, covered, unready | Wait or change target |
+| `NAVIGATION_FAILED` | Failed page load | Recheck URL/network |
+| `TIMEOUT` / `CANCELLED` | Deadline/cancel occurred | Inspect and decide retry |
+| `JS_EXCEPTION` / `RESULT_NOT_SERIALIZABLE` | Page script failed or could not serialize | Inspect exception/result |
+| `PERMISSION_DENIED` / `UNSUPPORTED_CAPABILITY` | Operation restricted or unsupported | Request consent or use documented fallback |
+| `SCREENSHOT_FAILED` | Native WebKit capture failed | Retry/inspect pane visibility |
+| `RESOURCE_LIMIT` | Bound on output, pending work, image size exceeded | Narrow query/clip or wait |
+
+Error results must include a human-readable message and `retryable` boolean; never quietly substitute a successful no-op.
+
+## 8. First-release CI / acceptance matrix
+
+- [ ] Machine-validate every command's JSON Schema and response against fixtures, malformed inputs and backwards-compatibility examples.
+- [ ] Real macOS test creates a browser pane, navigates to a deterministic local HTTP site, receives a compact a11y-oriented snapshot, locates labelled textbox/button by role/label/ref and successfully fills/clicks via `herdr-app do`.
+- [ ] WebKit input smoke test proves real website listeners observed expected events and documents `isTrusted` constraints. Screenshot comparison **must contain the actual HTML page's visible content**, not only surrounding GPUI.
+- [ ] `browser.eval` returns actual values and structured JS exceptions; `browser.wait` honors deadlines and cancellation; `browser.result` cannot hang/return stale data.
+- [ ] Multiple panes: wrong pane and stale document targets produce errors; two Agents cannot accidentally send actions to each other's pane; switching, split, background, resize, close, app quit and reload cancel pending operations correctly.
+- [ ] MCP `tools/list` advertises the same supported command contracts with real `inputSchema` and `outputSchema`; MCP tool invocation routes into the same Herdr window, **not a new WebView or external browser**.
+- [ ] Security: a malicious page cannot invoke local Agent commands, read arbitrary filesystem files or save screenshots outside private artifact storage; approval is respected for sensitive actions.
+- [ ] No upstream auto-integrated release is published without the browser automation suite. When a future upstream tag breaks the contract, create/update an actionable Issue and preserve the last working release.
+- [ ] Preserve original Herdr icon, `Herdr WebView` Dock identity, shared original settings and fork-only updates.
+
+## 9. Implementation sequencing
+
+1. **API contract and backend**: typed request/response/locator definitions, schema generation, stable pane/document identity, error codes.
+2. **WKWebView bridge**: asynchronous eval + result lifecycle, snapshot/query/inspect, native input implementation, native PNG capture, wait/cancel.
+3. **Herdr CLI**: command registration and working local socket calls; no app UI deadlocks; same tests across multiple panes.
+4. **MCP stdio bridge**: expose backend contracts as MCP tools without starting a separate browser; add Agent CLI configuration examples.
+5. **CI promotion**: real macOS fixture tests and security/release gates must pass before the release can claim Agent-controllable WebView.
+
+**No assumptions of pre-existing support:** v1.0 is a normative *design target*. Record actual implementation status per command in the PR and only label commands `supported` once exercised through the shipped Agent interface on macOS.
