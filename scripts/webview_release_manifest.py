@@ -65,7 +65,7 @@ def validate(archive: Path, dmg: Path, icon: Path, version: str) -> dict:
         if plist.get("HerdrWebViewVersion") != version:
             raise ValueError("Info.plist fork release version differs from Cargo")
         core, build = version.split("-webview.", 1)
-        if plist.get("CFBundleShortVersionString") != core or plist.get("CFBundleVersion") != f"{core}.{build}":
+        if plist.get("CFBundleShortVersionString") != core or plist.get("CFBundleVersion") != f"{core.rsplit('.', 1)[0]}.{int(core.rsplit('.', 1)[1]) * 1000 + int(build)}":
             raise ValueError("invalid Apple numeric bundle version")
         binary = read("Contents/MacOS/Herdr")
         if not binary:

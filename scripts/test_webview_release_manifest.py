@@ -27,7 +27,7 @@ class ManifestTests(unittest.TestCase):
             "CFBundleIdentifier":bundle_id,
             "HerdrWebViewVersion":version,
             "CFBundleShortVersionString":"0.1.16",
-            "CFBundleVersion":"0.1.16.1",
+            "CFBundleVersion":"0.1.16001",
         })
         files = {
             "Contents/Info.plist":plist,
