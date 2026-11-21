@@ -50,6 +50,7 @@ pub const COMMANDS: &[Command] = &[
     // Browser panes share Herdr's upstream tab model; the backend can vary.
     cmd("browser.capabilities", &[],
         "Report browser engines actually available in this build and the new-tab default."),
+    cmd("browser.list", &[], "List current Browser panes with their Herdr pane ids, URL and engine."),
     cmd("browser.open", &[opt("url"), opt("name"), opt("space"), opt("focus"), opt("engine")],
         "Open a Browser tab. Engine may be auto, wkwebview, or chrome-cdp; unavailable explicit engines fail rather than silently changing backends."),
     cmd("browser.navigate", &[opt("url"), opt("pane")],

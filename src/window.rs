@@ -3283,6 +3283,25 @@ impl AppWindow {
             "browser.capabilities" => {
                 self.answer(Ok(crate::browser_backend::capabilities()));
             }
+            "browser.list" => {
+                let mut panes = Vec::new();
+                for tab in self.model.tabs() {
+                    for node in tab.root.walk() {
+                        if let Some(Content::Mod { name, props }) = node.content()
+                            && crate::browser::is_browser(name)
+                        {
+                            let engine = crate::browser_backend::from_persisted(props);
+                            panes.push(json!({
+                                "pane": node.id,
+                                "tab": tab.id,
+                                "url": props.get("url").and_then(Value::as_str),
+                                "engine": engine.ok().map(crate::browser_backend::BrowserEngine::as_str),
+                            }));
+                        }
+                    }
+                }
+                self.answer(Ok(json!({ "panes":panes })));
+            }
             "browser.open" => {
                 let Some(focus) = Self::focus(a) else { return self.fail("browser.open focus is true or false") };
                 let requested_engine = match a.get("engine") {
@@ -3302,7 +3321,8 @@ impl AppWindow {
                     Err(error) => return self.fail(error),
                 };
                 let result = self.new_mod_tab(Self::owned(a, "space"), Self::arg(a, "name").unwrap_or("Browser"),
-                    crate::browser::MOD_NAME.to_owned(), json!({"url": url, "engine": engine.as_str()}), focus);
+                    crate::browser::MOD_NAME.to_owned(), json!({"url": url, "engine": engine.as_str()}), focus)
+                    .map(|mut record| { record["engine"] = json!(engine.as_str()); record });
                 self.answer(result);
             }
             "browser.navigate" => {
@@ -4964,6 +4984,14 @@ impl AppWindow {
                 if let Some(url) = props.get("url").and_then(Value::as_str) {
                     bar = bar.child(div().flex_1().min_w_0().overflow_hidden().text_xs().child(url.to_owned()));
                 }
+            }
+            if let Some(Content::Mod { props, .. }) = n.content() {
+                let engine = crate::browser_backend::from_persisted(props).ok()
+                    .map(|e| match e {
+                        crate::browser_backend::BrowserEngine::ChromeCdp => "Chrome CDP",
+                        crate::browser_backend::BrowserEngine::WkWebView => "WKWebView",
+                    }).unwrap_or("Unavailable engine");
+                bar = bar.child(div().text_xs().text_color(c("dim")).child(engine));
             }
             let body: AnyElement = if let Some(view) = self.chrome_views.get(&n.id) {
                 div().size_full().child(view.clone()).into_any_element()

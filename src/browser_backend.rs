@@ -29,16 +29,15 @@ pub struct Availability {
 }
 
 impl Availability {
-    /// Browser engines actually implemented and usable in THIS build.
-    ///
-    /// The local Chrome detector/renderer is added in PR A2-CDP. Reporting
-    /// Chrome as available before that adapter works would corrupt the
-    /// new-Tab default and deceive Agents.
-    pub const fn current() -> Self {
-        Self {
-            wkwebview: cfg!(target_os = "macos"),
-            chrome_cdp: false,
-        }
+    /// Chrome is selectable when a supported local Chrome 136+ is installed.
+    /// It is never bundled or downloaded. A launch failure is reported by the
+    /// owning pane rather than silently switching to a different engine.
+    pub fn current() -> Self {
+        #[cfg(target_os = "macos")]
+        let chrome_cdp = crate::chrome_cdp::discover().is_ok();
+        #[cfg(not(target_os = "macos"))]
+        let chrome_cdp = false;
+        Self { wkwebview: cfg!(target_os = "macos"), chrome_cdp }
     }
 }
 
@@ -60,7 +59,7 @@ pub fn resolve_new_tab(requested: Option<&str>, available: Availability) -> Resu
         "wkwebview" if available.wkwebview => Ok(BrowserEngine::WkWebView),
         "chrome-cdp" if available.chrome_cdp => Ok(BrowserEngine::ChromeCdp),
         "wkwebview" => Err("WKWebView backend is unavailable on this platform".into()),
-        "chrome-cdp" => Err("Chrome CDP backend is not implemented or available in this build".into()),
+        "chrome-cdp" => Err("CHROME_NOT_INSTALLED: Chrome 136+ not available; install Google Chrome in /Applications".into()),
         other => Err(format!("unknown browser engine {other:?}; expected auto, wkwebview or chrome-cdp")),
     }
 }
@@ -109,8 +108,10 @@ pub fn capabilities() -> Value {
             },
             "chrome-cdp": {
                 "available": available.chrome_cdp,
-                "implemented": false,
-                "reason": "local Chrome CDP adapter and GPUI renderer pending"
+                "implemented": cfg!(target_os = "macos"),
+                "actions": ["open", "navigate", "back", "forward", "reload"],
+                "agent_automation": false,
+                "notes": "GPUI stream/CDP input experimental; agent API and MCP pending"
             }
         }
     })
@@ -157,10 +158,11 @@ mod tests {
     }
 
     #[test]
-    fn unimplemented_chrome_is_never_advertised_as_ready() {
+    fn chrome_capabilities_reflect_platform_and_installed_browser() {
         let caps = capabilities();
         assert_eq!(caps["api_version"], API_VERSION);
-        assert_eq!(caps["engines"]["chrome-cdp"]["available"], false);
-        assert_eq!(caps["engines"]["chrome-cdp"]["implemented"], false);
+        assert_eq!(caps["engines"]["chrome-cdp"]["available"], Availability::current().chrome_cdp);
+        assert_eq!(caps["engines"]["chrome-cdp"]["implemented"], cfg!(target_os = "macos"));
+        assert_eq!(caps["engines"]["chrome-cdp"]["agent_automation"], false);
     }
 }

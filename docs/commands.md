@@ -181,6 +181,12 @@ Report browser engines actually available in this build and the new-tab default.
 
 No arguments.
 
+## `browser.list`
+
+List current Browser panes with their Herdr pane identifiers, URLs and engines.
+
+No arguments.
+
 ## `browser.open`
 
 Open a Browser tab. Engine may be auto, wkwebview, or chrome-cdp; unavailable explicit engines fail rather than silently changing backends.

@@ -1213,15 +1213,17 @@ including a small herdr-core skill you can install with the user's permission.
 ### Native browser tabs (macOS fork extension)
 
 Browser tabs use Herdr's existing tab and pane layout, not a second tab
-model or desktop window. In this build, only macOS WKWebView is implemented.
-Chrome CDP is reserved for a future adapter; choosing an unavailable engine
-returns an error rather than silently opening a different one. These commands
-are fork-specific:
+model or desktop window. Both WKWebView and locally installed Chrome CDP
+can render on macOS. Chrome v136+ must be installed separately; a dedicated
+persistent Chrome profile is used, never Chrome's daily profile.
+An unavailable explicit engine returns an error. These commands are fork-specific:
 
 - `browser.capabilities` — report the available engines and new-tab default.
+- `browser.list` — report current Browser pane IDs, URLs and engine identifiers.
 - `browser.open` — create a Browser tab: `herdr-app do browser.open '{"url":"https://example.com","engine":"auto"}'`.
   Optional `engine`: `auto`, `wkwebview`, or `chrome-cdp`. The `auto` setting
-  prefers Chrome only when its full backend is ready; currently it selects WKWebView.
+  prefers a supported installed Chrome, falling back to WKWebView if unavailable.
+  Chrome CLI/MCP automation is not yet implemented; the CDP renderer is experimental.
 - `browser.navigate` — load a URL in a browser pane (optional `pane`), preserving
   the pane's engine and other saved properties.
 - `browser.address` — show the browser URL input dialog.

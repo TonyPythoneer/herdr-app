@@ -482,6 +482,19 @@ mod tests {
         drop(client);
         stop.store(true, AtomicOrdering::Relaxed);
         server.join().unwrap();
-        fs::remove_dir_all(profile).unwrap();
+        // Chrome's helper processes can still flush Preferences/History
+        // briefly after the headless browser exits. Retry only the ephemeral
+        // test profile cleanup; never touch the persistent user's profile.
+        let mut cleaned = false;
+        for _ in 0..40 {
+            match fs::remove_dir_all(&profile) {
+                Ok(()) => { cleaned = true; break; }
+                Err(error) if error.kind() == io::ErrorKind::DirectoryNotEmpty => {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Err(error) => panic!("cannot clean isolated Chrome test profile: {error}"),
+            }
+        }
+        assert!(cleaned, "Chrome helper processes kept writing the test profile after shutdown");
     }
 }
