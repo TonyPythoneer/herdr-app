@@ -11,6 +11,8 @@ mod chrome_cdp;
 mod chrome_view;
 #[cfg(target_os = "macos")]
 mod browser_api;
+#[cfg(target_os = "macos")]
+mod browser_mcp;
 mod commands;
 mod control;
 mod core_bin;
@@ -63,6 +65,7 @@ Usage:
   herdr-app status                 what the window shows, and any errors
   herdr-app shot [file.png]        save the current window frame (default: herdr-shot.png)
   herdr-app check <mod folder>     load a mod once and report what's wrong
+  herdr-app browser-mcp            MCP stdio browser tools (macOS; same Herdr window)
   herdr-app --skill                Agent Skill: driving the window, and where hc fits
   herdr-app --version
 
@@ -125,6 +128,10 @@ fn main() {
         }
         gpui_shell::host::main_with_components(gpui_shell::FrozenComponentRegistry::default());
         return;
+    }
+    #[cfg(target_os = "macos")]
+    if args.get(1).map(String::as_str) == Some("browser-mcp") {
+        std::process::exit(browser_mcp::serve_stdio());
     }
     if matches!(args.get(1).map(String::as_str), Some("do" | "status" | "ls" | "commands" | "feedback" | "shot")) {
         std::process::exit(control::client(&args[1..]));

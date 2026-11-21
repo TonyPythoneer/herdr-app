@@ -1235,8 +1235,10 @@ An unavailable explicit engine returns an error. These commands are fork-specifi
   `pane` from `browser.list`, then use `browser.result` to collect the result.
   On `APPROVAL_REQUIRED`, only the real GPUI desktop confirmation can approve
   that exact request; no CLI, mod, browser script or MCP command may approve it.
-  The Chrome Agent API is experimental. WKWebView Agent parity and MCP stdio
-  transport remain unimplemented; do not claim both backends offer parity.
+  The Chrome Agent API is experimental. Register the same-window MCP stdio
+  server with an Agent as `herdr-app browser-mcp`; it exposes the same browser
+  commands and cannot approve its own high-risk actions. WKWebView Agent
+  parity remains unimplemented; do not claim both backends offer parity.
 - `browser.navigate` — load a URL in a browser pane (optional `pane`), preserving
   the pane's engine and other saved properties.
 - `browser.address` — show the browser URL input dialog.

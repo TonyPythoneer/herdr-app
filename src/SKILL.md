@@ -26,6 +26,29 @@ Package-managed cores are checked but updated through their package manager.
 Dismiss a core update error with its × or `overlay.close {id:"core-update-error"}`;
 it stays dismissed until the error changes or the update recovers.
 
+## Browser automation (macOS fork)
+
+Use the existing Herdr browser pane, never a separate hidden browser window.
+`herdr-app do browser.capabilities` lists implemented engines. New Browser tabs
+prefer installed Chrome 136+ and otherwise use WKWebView; old saved tabs retain
+their persisted engine. Every Agent page operation requires an explicit `pane`
+from `herdr-app do browser.list`. Example:
+
+```sh
+herdr-app do browser.open '{"url":"https://example.com","engine":"auto","focus":false}'
+herdr-app do browser.list
+herdr-app do browser.snapshot '{"pane":"<pane>","max_nodes":50}'
+herdr-app do browser.query '{"pane":"<pane>","target":{"role":"button","name":"Search"}}'
+```
+
+Page operations return a random `request_id` and `status: accepted`:
+poll `browser.result {"request_id":"..."}` to read the completed result.
+If `approval_required` is true, only the person can approve via Herdr's
+native UI. Do not attempt to bypass approval by calling other commands.
+The optional MCP stdio server is `herdr-app browser-mcp` and connects to
+the exact same Herdr window. At present, the Agent DOM/interaction operations
+are for Chrome CDP; WKWebView automation parity is still pending.
+
 ## Show something when asked
 
 New spaces and tabs are shown immediately: only create them when asked.

@@ -5071,7 +5071,7 @@ impl AppWindow {
             .border_1().border_color(c("border"))
             .shadow_lg()
             .flex().flex_col().gap_3()
-            .child(div().font_semibold().text_lg().child("Approve browser action?"))
+            .child(div().font_bold().text_lg().child("Approve browser action?"))
             .child(div().text_sm().child(summary))
             .child(div().text_sm().child(risk))
             .child(div().text_sm().text_color(c("dim"))
