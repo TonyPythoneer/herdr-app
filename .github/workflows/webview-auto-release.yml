@@ -1,0 +1,135 @@
+name: webview-auto-release
+
+# Runs only from default branch. Trigger when either CI workflow completes;
+# a gate checks *all* required jobs at the exact integration commit.
+on:
+  workflow_run:
+    workflows: [ci, browser-macos]
+    types: [completed]
+    branches: [feature/native-browser-tabs]
+  workflow_dispatch:
+    inputs:
+      integration_sha:
+        description: "Exact already-validated integration commit SHA"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: webview-stable-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'feature/native-browser-tabs' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Validate exact SHA belongs to maintained integration branch
+        id: sha
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DISPATCH_SHA: ${{ inputs.integration_sha }}
+          WORKFLOW_SHA: ${{ github.event.workflow_run.head_sha }}
+          EVENT: ${{ github.event_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha="$WORKFLOW_SHA"
+          if [[ "$EVENT" == workflow_dispatch ]]; then sha="$DISPATCH_SHA"; fi
+          [[ "$sha" =~ ^[a-f0-9]{40}$ ]] || exit 1
+          # Never publish code from an arbitrary PR or untrusted branch.
+          branch_sha="$(gh api "repos/$GH_REPO/branches/feature/native-browser-tabs" --jq '.commit.sha')"
+          [[ "$branch_sha" == "$sha" ]] || { echo "Integration HEAD moved; wait for its own CI"; exit 1; }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - name: Checkout exact integration commit (not default branch)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.sha.outputs.sha }}
+          persist-credentials: false
+      - name: Check release prerequisites at this exact SHA
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SHA: ${{ steps.sha.outputs.sha }}
+        run: |
+          set -euo pipefail
+          if ! test -f scripts/webview_release_manifest.py; then
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+            echo "Release blocked: manifest producer has not merged yet."
+            exit 0
+          fi
+          gh api "repos/$GH_REPO/commits/$SHA/check-runs?per_page=100" > "$RUNNER_TEMP/checks.json"
+          if python3 scripts/webview_release_gate.py < "$RUNNER_TEMP/checks.json"; then
+            echo "eligible=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+            echo "Release blocked: required native/browser/approval E2E checks not all green."
+          fi
+      - name: Verify version and find successful browser packaging run
+        if: steps.gate.outputs.eligible == 'true'
+        id: assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SHA: ${{ steps.sha.outputs.sha }}
+        run: |
+          set -euo pipefail
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml","rb"))["package"]["version"])')"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-webview\.[0-9]+$ ]] || exit 1
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          run="$(gh api "repos/$GH_REPO/actions/runs?head_sha=$SHA&per_page=100" --jq '[.workflow_runs[] | select(.name=="browser-macos" and .conclusion=="success")][0].id // empty')"
+          [[ "$run" =~ ^[0-9]+$ ]] || { echo "Cannot find passing macOS packaging workflow"; exit 1; }
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+      - name: Download and independently validate release artifacts
+        if: steps.gate.outputs.eligible == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh run download "${{ steps.assets.outputs.run }}" -R "$GH_REPO" --name Herdr-WebView-updater-assets --dir dist
+          gh run download "${{ steps.assets.outputs.run }}" -R "$GH_REPO" --name Herdr-Browser-macos-arm64 --dir dist
+          cp dist/latest.json "$RUNNER_TEMP/from-ci-latest.json"
+          python3 scripts/webview_release_manifest.py \
+            --archive dist/herdr-app-macos-aarch64.tar.gz \
+            --dmg dist/Herdr-Browser-macos-arm64.dmg \
+            --original-icon assets/icons/Herdr.icns \
+            --output dist/latest.json
+          cmp dist/latest.json "$RUNNER_TEMP/from-ci-latest.json"
+      - name: Publish fully verified assets as stable Release (manifest last)
+        if: steps.gate.outputs.eligible == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ steps.assets.outputs.version }}
+          SHA: ${{ steps.sha.outputs.sha }}
+        run: |
+          set -euo pipefail
+          tag="v$VERSION"
+          if gh release view "$tag" -R "$GH_REPO" >/dev/null 2>&1; then
+            is_draft="$(gh release view "$tag" -R "$GH_REPO" --json isDraft --jq .isDraft)"
+            if [[ "$is_draft" != true ]]; then
+              echo "Existing published release $tag; no overwrite or duplicate"
+              exit 0
+            fi
+          else
+            gh release create "$tag" -R "$GH_REPO" --target "$SHA" --draft \
+              --title "Herdr WebView $VERSION" \
+              --notes "Stable, verified Herdr WebView for macOS Apple Silicon."
+          fi
+          # A stable release is never visible before every artifact is uploaded.
+          gh release upload "$tag" -R "$GH_REPO" \
+            dist/herdr-app-macos-aarch64.tar.gz dist/Herdr-Browser-macos-arm64.dmg --clobber
+          gh release upload "$tag" -R "$GH_REPO" dist/latest.json --clobber
+          gh release edit "$tag" -R "$GH_REPO" --draft=false --latest
