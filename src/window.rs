@@ -426,6 +426,9 @@ pub struct AppWindow {
     /// Native macOS WKWebViews, keyed by existing Herdr pane id (no new tab model).
     #[cfg(target_os = "macos")]
     browser_views: HashMap<String, Entity<gpui_wry::WebView>>,
+    /// CDP stream views, keyed by the same upstream pane identifiers.
+    #[cfg(target_os = "macos")]
+    chrome_views: HashMap<String, Entity<crate::chrome_view::ChromeView>>,
     #[cfg(target_os = "macos")]
     browser_urls: HashMap<String, String>,
     #[cfg(target_os = "macos")]
@@ -561,6 +564,8 @@ impl AppWindow {
             terms: HashMap::new(),
             #[cfg(target_os = "macos")]
             browser_views: HashMap::new(),
+            #[cfg(target_os = "macos")]
+            chrome_views: HashMap::new(),
             #[cfg(target_os = "macos")]
             browser_urls: HashMap::new(),
             #[cfg(target_os = "macos")]
@@ -3316,11 +3321,16 @@ impl AppWindow {
                 }) else { return self.fail("not a browser pane") };
                 crate::browser_backend::set_pane_url(props, &url);
                 #[cfg(target_os = "macos")]
-                if let Some(view) = self.browser_views.get(&pane) {
-                    if let Err(error) = view.update(cx, |v, _| v.raw().load_url(&url)) {
-                        tracing::warn!("browser navigate: {error}");
+                {
+                    if let Some(view) = self.browser_views.get(&pane) {
+                        if let Err(error) = view.update(cx, |v, _| v.raw().load_url(&url)) {
+                            tracing::warn!("browser navigate: {error}");
+                        }
+                        self.browser_urls.insert(pane.clone(), url.clone());
                     }
-                    self.browser_urls.insert(pane, url);
+                    if let Some(view) = self.chrome_views.get(&pane) {
+                        view.update(cx, |v, cx| v.navigate(&url, cx));
+                    }
                 }
             }
             "browser.address" => {
@@ -3337,16 +3347,24 @@ impl AppWindow {
             "browser.back" | "browser.forward" | "browser.reload" => {
                 let Some(pane) = self.browser_pane(Self::arg(a, "pane")) else { return self.fail("no browser pane") };
                 #[cfg(target_os = "macos")]
-                match self.browser_views.get(&pane) {
-                    Some(view) => {
-                        let result = view.update(cx, |v, _| match name {
-                            "browser.back" => v.back(),
-                            "browser.forward" => v.raw().evaluate_script("history.forward();").map_err(anyhow::Error::from),
-                            _ => v.raw().reload().map_err(anyhow::Error::from),
-                        });
-                        if let Err(error) = result { return self.fail(format!("browser action failed: {error:#}")); }
+                {
+                    if let Some(view) = self.chrome_views.get(&pane) {
+                        if let Err(error) = view.update(cx, |v, cx| v.action(name, cx)) {
+                            return self.fail(error);
+                        }
+                    } else {
+                        match self.browser_views.get(&pane) {
+                            Some(view) => {
+                                let result = view.update(cx, |v, _| match name {
+                                    "browser.back" => v.back(),
+                                    "browser.forward" => v.raw().evaluate_script("history.forward();").map_err(anyhow::Error::from),
+                                    _ => v.raw().reload().map_err(anyhow::Error::from),
+                                });
+                                if let Err(error) = result { return self.fail(format!("browser action failed: {error:#}")); }
+                            }
+                            None => return self.fail("browser pane is not loaded"),
+                        }
                     }
-                    None => return self.fail("browser pane is not loaded"),
                 }
                 #[cfg(not(target_os = "macos"))]
                 return self.fail("native browser tabs are available on macOS only");
@@ -4835,26 +4853,20 @@ impl AppWindow {
             .map(|n| n.id.clone())
     }
 
-    /// Owns the native WKWebViews for browser panes across tab switches.
-    /// Inactive views stay allocated but hidden; closing a tab releases them.
+    /// Each Herdr pane owns one engine. Hidden panes preserve their sessions,
+    /// while removed panes release their native view or CDP target.
     #[cfg(target_os = "macos")]
     fn sync_browser_views(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let mut owned: HashMap<String, Result<String, String>> = HashMap::new();
+        use crate::browser_backend::BrowserEngine;
+        let mut owned: HashMap<String, Result<(BrowserEngine, String), String>> = HashMap::new();
         for tab in self.model.tabs() {
             for node in tab.root.walk() {
                 if let Some(Content::Mod { name, props }) = node.content()
                     && crate::browser::is_browser(name)
                 {
-                    // Until ChromeCdpAdapter is integrated, an explicitly
-                    // persisted Chrome pane must NEVER be shown as WKWebView.
-                    let resolved = match crate::browser_backend::from_persisted(props) {
-                        Ok(crate::browser_backend::BrowserEngine::WkWebView) => crate::browser::url_from_props(props),
-                        Ok(crate::browser_backend::BrowserEngine::ChromeCdp) => {
-                            Err("Chrome CDP backend is not available in this build".into())
-                        }
-                        Err(error) => Err(error),
-                    };
-                    owned.insert(node.id.clone(), resolved);
+                    let desired = crate::browser_backend::from_persisted(props)
+                        .and_then(|engine| Ok((engine, crate::browser::url_from_props(props)?)));
+                    owned.insert(node.id.clone(), desired);
                 }
             }
         }
@@ -4864,14 +4876,20 @@ impl AppWindow {
                 .filter(|n| matches!(n.content(), Some(Content::Mod { name, .. }) if crate::browser::is_browser(name)))
                 .map(|n| n.id.clone()).collect()).unwrap_or_default()
         } else { HashSet::new() };
-        let stale: Vec<_> = self.browser_views.keys().filter(|id| !owned.contains_key(*id)).cloned().collect();
-        for id in stale {
+        let stale_wk: Vec<_> = self.browser_views.keys()
+            .filter(|id| !matches!(owned.get(*id), Some(Ok((BrowserEngine::WkWebView, _)))))
+            .cloned().collect();
+        for id in stale_wk {
             if let Some(view) = self.browser_views.remove(&id) {
                 view.update(cx, |view, _| view.hide());
             }
             self.browser_urls.remove(&id);
-            self.browser_errors.remove(&id);
         }
+        let stale_chrome: Vec<_> = self.chrome_views.keys()
+            .filter(|id| !matches!(owned.get(*id), Some(Ok((BrowserEngine::ChromeCdp, _)))))
+            .cloned().collect();
+        for id in stale_chrome { self.chrome_views.remove(&id); }
+        self.browser_errors.retain(|id, _| owned.contains_key(id));
         for (id, desired) in owned {
             if !visible.contains(&id) {
                 if let Some(view) = self.browser_views.get(&id) {
@@ -4879,17 +4897,33 @@ impl AppWindow {
                 }
                 continue;
             }
-            let url = match desired {
-                Ok(url) => url,
+            let (engine, url) = match desired {
+                Ok(info) => info,
                 Err(error) => {
                     if let Some(view) = self.browser_views.remove(&id) {
                         view.update(cx, |v, _| v.hide());
                     }
+                    self.chrome_views.remove(&id);
                     self.browser_urls.remove(&id);
-                    self.browser_errors.insert(id.clone(), error);
+                    self.browser_errors.insert(id, error);
                     continue;
                 }
             };
+            if engine == BrowserEngine::ChromeCdp {
+                if let Some(view) = self.browser_views.remove(&id) {
+                    view.update(cx, |v, _| v.hide());
+                }
+                self.browser_urls.remove(&id);
+                self.browser_errors.remove(&id);
+                if let Some(view) = self.chrome_views.get(&id) {
+                    view.update(cx, |v, cx| v.navigate(&url, cx));
+                } else {
+                    let pane_id = id.clone();
+                    self.chrome_views.insert(id, cx.new(|cx|
+                        crate::chrome_view::ChromeView::new(pane_id, url, cx)));
+                }
+                continue;
+            }
             if let Some(view) = self.browser_views.get(&id) {
                 let needs_navigation = self.browser_urls.get(&id) != Some(&url);
                 view.update(cx, |v, _| {
@@ -4931,7 +4965,9 @@ impl AppWindow {
                     bar = bar.child(div().flex_1().min_w_0().overflow_hidden().text_xs().child(url.to_owned()));
                 }
             }
-            let body: AnyElement = if let Some(view) = self.browser_views.get(&n.id) {
+            let body: AnyElement = if let Some(view) = self.chrome_views.get(&n.id) {
+                div().size_full().child(view.clone()).into_any_element()
+            } else if let Some(view) = self.browser_views.get(&n.id) {
                 div().size_full().child(view.clone()).into_any_element()
             } else {
                 let error = self.browser_errors.get(&n.id).map(String::as_str).unwrap_or("loading browser...");

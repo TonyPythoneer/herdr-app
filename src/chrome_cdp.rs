@@ -11,7 +11,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
-        Arc, Mutex, Weak,
+        Arc, Mutex, Weak, OnceLock,
         atomic::{AtomicU64, Ordering},
         mpsc::{self, Receiver, Sender, SyncSender},
     },
@@ -245,6 +245,21 @@ impl Client {
     }
 }
 
+
+static SHARED_CHROME: OnceLock<Mutex<Weak<Client>>> = OnceLock::new();
+
+/// All Chrome panes share one headless Chrome process and a private profile.
+/// The mutex prevents concurrent pane creation from racing on the profile lock.
+pub fn shared_client() -> Result<Arc<Client>, String> {
+    let lock = SHARED_CHROME.get_or_init(|| Mutex::new(Weak::new()));
+    let mut shared = lock.lock().unwrap();
+    if let Some(client) = shared.upgrade() { return Ok(client); }
+    let chrome = discover()?;
+    let client = Client::start(&chrome, &persistent_profile())?;
+    *shared = Arc::downgrade(&client);
+    Ok(client)
+}
+
 impl Drop for Client {
     fn drop(&mut self) {
         if let Ok(mut child) = self.child.lock() {
@@ -290,6 +305,10 @@ pub struct Session {
 }
 
 impl Session {
+    pub fn post(&self, name: &str, params: Value) -> Result<(), String> {
+        self.client.send(name, params, Some(&self.session))
+    }
+
     pub fn command(&self, name: &str, params: Value) -> Result<Value, String> {
         self.client.request(name, params, Some(&self.session))
     }

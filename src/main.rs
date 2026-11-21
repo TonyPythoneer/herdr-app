@@ -7,6 +7,8 @@ mod browser;
 mod browser_backend;
 #[cfg(target_os = "macos")]
 mod chrome_cdp;
+#[cfg(target_os = "macos")]
+mod chrome_view;
 mod commands;
 mod control;
 mod core_bin;
