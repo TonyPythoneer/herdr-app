@@ -268,12 +268,28 @@ In #8 the Rust cache archive was **~2.26 GB compressed**. Restore + save account
 
 **API contract release gate:** [Browser Automation Contract v1.0](https://github.com/TonyPythoneer/herdr-webview/blob/feature/native-browser-tabs/docs/BROWSER_AUTOMATION_API_CONTRACT.md) is normative; all mandatory `browser.*` commands must pass both CLI and MCP macOS integration tests. The agent must operate the actual Herdr WKWebView, not an external browser.
 
+### WKWebView Chrome-like automation and UI-test reliability policy (mandatory)
+
+> **Full risk register and release gates:** [`Browser Automation API Contract v1.0 — `10. Chrome-like UI testing`](https://github.com/TonyPythoneer/herdr-webview/blob/feature/native-browser-tabs/docs/BROWSER_AUTOMATION_API_CONTRACT.md#10-chrome-like-ui-testing-feasibility-boundaries-risk-gates-and-safer-defaults-2026-11-21). This is **Chrome/Playwright-like Agent semantics**, not wire-level CDP, Playwright or WebDriver BiDi compatibility.
+
+- [ ] **Proof of feasibility before implementation expansion:** demonstrate one test through the running, visible, embedded WKWebView: Agent CLI request → DOM snapshot/query → form fill/click → awaited DOM assertion → real native screenshot. Show trusted-vs-synthetic input evidence. Do not infer support from `lb-wry` JS eval alone.
+- [ ] **True native input is a P0 gate:** synthetic JS `element.click()` does not imply real mouse/keyboard events. Validate AppKit/CGEvent or supported WebKit automation input on macOS, including permissions and `isTrusted` where relevant. If unavailable, fail clearly rather than silently substitute a fake pass.
+- [ ] **Two UI-test layers:** embedded web page via `browser.*` commands; Herdr GPUI chrome (Tab, split, menu, dialog, focus, overlay) via **macOS native UI harness operating the same Herdr WebView App**. DOM-only browser tools cannot inspect unrelated native GPUI widgets.
+- [ ] **Avoid CI illusions:** GitHub-hosted macOS runners may lack Accessibility/TCC grants for native input. Prove the environment first; if necessary use a trusted configured macOS runner for required end-to-end native tests. A skipped/unavailable native gate blocks automatic Release and creates a deduplicated Issue.
+- [ ] **Isolated test state:** `HERDR_APP_HOME` points to ephemeral test data; browser test session uses nonpersistent WebKit storage and local/staging pages, not the user's real saved login/session or production configuration. Normal user app continues sharing the original Herdr settings as agreed.
+- [ ] **Postcondition is required:** inspect → act → assert state/URL/text/visibility. Do not equate “JS executed” with test success; re-observe before retrying non-idempotent submissions.
+- [ ] **One pane, one document:** use exact pane/document/snapshot IDs; invalidate stale refs on navigation, prevent cross-pane Agent actions, limit outstanding async calls, cancel pending work on close/reload. Record structured errors and bounded redacted evidence.
+- [ ] **Security boundaries:** browser DOM/screenshot results are untrusted; WebKit page scripts cannot access native/Agent privileges. Validate local Unix socket permissions and peer where supported; no public automation port. Sensitive live-site purchases/sends/deletes require explicit approval; staging fixture tests run unattended.
+- [ ] **Platform limits are explicit:** cross-origin iframe, CAPTCHA, site defenses and Chrome-only API domains must not be claimed supported without verified tests. Native screenshots use WKWebView APIs, not GPUI-only frame capture.
+
+**Release acceptance:** real macOS fixture passes end-to-end CLI *and* local MCP adapter integration; records actual input mechanism and screenshot; validates browser and native Herdr container UI; no mandatory gate skipped. If any P0 case cannot be demonstrated with the chosen embedded WKWebView backend, preserve the last good release and create a repair Issue.
+
 ## Test and acceptance matrix (mandatory)
 
 - [ ] Weekly upstream monitor ignores duplicate, older, moving/unverified and prerelease tags; picks exact stable commit; creates one integration PR. A skipped week is caught up by the next scheduled run or manual dispatch.
 - [ ] New upstream changes preserve Browser tab, address UI, navigation and original icon; conflicts and dependency breaks block release with a visible log.
 - [ ] Rust unit tests cover valid/invalid URLs, version comparisons (especially numeric webview revisions), manifest format, invalid/foreign URLs and integrity failures.
-- [ ] **Real macOS WebView E2E + Agent automation** creates an embedded Browser tab with a local fixture, exercises Agent-side inspect/query/click/fill/type/press/scroll/eval/true WebView screenshot through `herdr-app do`, validates navigation, tab switching and clean close. Generic GPU screenshot tests alone are insufficient.
+- [ ] **Real macOS WebView E2E + Agent automation** creates an embedded Browser tab with a local fixture, exercises Agent-side inspect/query/click/fill/type/press/scroll/eval/true WebView screenshot through `herdr-app do`, validates **real input/event trust**, post-action UI assertions, navigation, tab switching and clean close. Additionally validate Herdr's *native GPUI container* using a macOS UI harness. Generic GPU screenshot tests alone are insufficient.
 - [ ] Packaging tests verify original icon, **Herdr WebView.app Dock/Finder identity**, .app bundle contents, shared config home, **hard refusal of WebView launch while original Herdr is running (including race/stale-socket tests)**, ad-hoc code signature, license/third-party notices, archive/manifest SHA-256, and correct fork update feed.
 - [ ] App update integration tests verify newer release stage/restart/rollback and failure cases: wrong checksum, older version, malformed manifest, network failures and missing assets; plus weekly rolling cadence and missed-week catch-up scenarios.
 - [ ] Release step runs only when required checks pass; only macOS ARM64 deliverables, no Apple certificate/notarization secret required.
@@ -286,7 +302,7 @@ In #8 the Rust cache archive was **~2.26 GB compressed**. Restore + save account
 
 0. **PR 0 (CI speed / reproducibility)** — commit complete Cargo.lock, stable cache key, cache-write gate, docs-only skip of heavy jobs; baseline/timing summary.
 1. **PR A** — mandatory Native Pane Adapter/BrowserHost isolation, strict original-vs-WebView startup gate, browser-tab E2E, stable SemVer and original-icon package verification.
-1a. **PR A2 (required before release)** — implement [Browser Automation Contract v1.0](https://github.com/TonyPythoneer/herdr-webview/blob/feature/native-browser-tabs/docs/BROWSER_AUTOMATION_API_CONTRACT.md) end-to-end: CLI + stdio MCP, schema-validated results, snapshot/locators, async DOM/JS bridge, true native input and WKWebView screenshots, permission checks and macOS E2E tests.
+1a. **PR A2 (required before release, starts with native input/CI permissions feasibility spike)** — implement [Browser Automation Contract v1.0](https://github.com/TonyPythoneer/herdr-webview/blob/feature/native-browser-tabs/docs/BROWSER_AUTOMATION_API_CONTRACT.md) end-to-end: CLI + stdio MCP, schema-validated results, snapshot/locators, async DOM/JS bridge, true native input and WKWebView screenshots, permission checks and macOS E2E tests.
 2. **PR B** — independent GitHub manifest / macOS updater tarball + fork-specific app update code, tests and one-time migration.
 3. **PR C** — default-branch upstream-tag polling + safe integration PRs + compatible WebView reapplication + release gating.
 4. Enable fully automatic release only after all tests and a successful manual dry-run of the workflow.
@@ -297,6 +313,8 @@ In #8 the Rust cache archive was **~2.26 GB compressed**. Restore + save account
 
 ## Review decisions
 
+- [x] UI testing: Agent operates the **visible embedded WKWebView** via browser commands and MCP, plus a macOS native UI harness for non-web Herdr chrome. No raw Chrome CDP requirement or external browser. Must validate trusted input and real screenshots; permission-dependent skipped CI gates block release.
+- [x] Default unattended test target: isolated local/staging webpages and ephemeral browser profile, not live accounts or the user's original shared config. Live high-impact actions require approval.
 - [x] Browser Automation API Contract v1.0: inspired by Playwright MCP, Chrome DevTools MCP, WebDriver BiDi and MCP; **Herdr custom API**, not false protocol compatibility. CLI + local MCP adapter and native macOS WebView E2E are release requirements.
 - [x] First-release scope: AI can directly operate embedded WebView (DOM, click, input, JavaScript, native screenshots); not postponed.
 - [ ] Automatic release after green CI, but conflicts always require manual review: **recommended**.
