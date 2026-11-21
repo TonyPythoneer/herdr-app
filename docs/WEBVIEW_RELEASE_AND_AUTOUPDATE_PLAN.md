@@ -6,6 +6,8 @@
 
 ## Locked requirements
 
+> **macOS app label decision:** the fork's visible name is **Herdr WebView** (Dock/Finder), while it uses the **same underlying Herdr configuration path and schema**. The original icon remains unchanged.
+
 1. **Keep original upstream Herdr icon** (SVG and `.icns`): do not add any globe.
 2. **No Apple Developer certificate or notarization.** Use ad-hoc macOS signing only. macOS may still display Gatekeeper warnings; do not bypass the OS security system.
 3. Keep WKWebView **inside an existing Herdr tab/pane**, not as a separate browser window. Preserve app layout behavior and minimize modifications to upstream.
@@ -42,7 +44,7 @@ macOS ARM64 Actions checks
   cargo check/test + native WebView inside-tab smoke + package checks
           | fail => STOP, no release
           v
-Ad-hoc signed Herdr.app (ORIGINAL icon), updater .tar.gz, manual-install .dmg
+Ad-hoc signed Herdr WebView.app (ORIGINAL icon), updater .tar.gz, manual-install .dmg
           |
           v
 GitHub stable Release: assets published, latest.json / checksum published LAST
@@ -81,12 +83,25 @@ Notify Restart to Update => safe replace / recovery if failed
 - [ ] Reuse upstream `scripts/package` + `scripts/mac-sign` ad-hoc path. Do not invoke `scripts/mac-dmg` because its official Developer ID + notarization secrets are required.
 - [ ] From a passing macOS ARM64 CI generate and verify:
   - `Herdr-WebView-macos-arm64.dmg` for manual installs.
-  - `herdr-app-macos-aarch64.tar.gz` containing `Herdr.app` for existing updater.
+  - `herdr-app-macos-aarch64.tar.gz` containing `Herdr WebView.app` for the fork updater (update `src/update.rs::PACKED` accordingly).
   - `latest.json` (stable release asset) with version, target key `macos-aarch64`, download URL, and SHA256 of tarball.
 - [ ] Use **fork-specific monotonic SemVer** `0.1.16-webview.1`, `0.1.16-webview.2`, `0.1.17-webview.1` etc. Stamp `Cargo.toml`, `herdr-app --version`, bundle Info.plist, release tag and manifest consistently. The existing simplified `newer()` function must be replaced with correct SemVer numeric component comparisons (e.g. `webview.10 > webview.9`).
 - [ ] Publish full release only after test, packaging and digest checks pass. Use stable Releases for `/releases/latest/download/latest.json`; GitHub prereleases aren't included in latest.
 - [ ] Keep release artifacts available long-term via GitHub Releases (not temporary Actions artifacts), with required permissions and concurrency control.
-- [ ] If original and custom apps should coexist, separately plan an alternative Bundle ID/installer name without changing the icon. This is a design decision, not an approved code change.
+- [ ] Adopt the confirmed visible macOS name **Herdr WebView** and a distinct bundle ID while **sharing the exact upstream config directory**; preserve one active instance per shared home (details in App identity section).
+
+### App identity and shared configuration (user decision)
+
+**Only the macOS app identity/display name changes, not the original icon, Herdr configuration format or user data location.**
+
+- [ ] The macOS **Dock hover label, Finder app name and app menu** must visibly read **`Herdr WebView`** (suffix "WebView"). Distribute it as `Herdr WebView.app`, with `CFBundleName` and `CFBundleDisplayName` set to `Herdr WebView` in `scripts/package`. Verify the actual Dock label on macOS CI/a manual macOS smoke test; changing only a DMG name or Release title is insufficient.
+- [ ] Retain the **official original Herdr icon** (`Herdr.icns` and SVG) byte-for-byte; do not generate a new globe artwork.
+- [ ] Use a **distinct macOS CFBundleIdentifier** for the fork (proposed `dev.herdr.webview`) to prevent LaunchServices identity conflicts with the official `dev.herdr.app`. A different bundle identifier does **not** require a different configuration directory. Use ad-hoc signing; no Apple Developer ID credentials.
+- [ ] **Share the exact upstream Herdr config home and schema**: `HERDR_APP_HOME` override first, otherwise `$XDG_CONFIG_HOME/herdr-app` or `~/.config/herdr-app` (see `src/mods.rs::app_dir()`). Do not rename or fork `settings.json`, `mods/`, layout/workspace files, or reinitialize user settings for the WebView flavor. Maintain upstream migration/compatibility rules; never silently overwrite or reset the original data. Do not introduce a new `~/.config/herdr-webview`.
+- [ ] Keep `herdr-core` configuration and CLI integration consistent with upstream. Keep the internal binary/CLI identifier (`herdr-app`) where possible; the macOS display name is the intended visible distinction. Display a fork-specific version string such as `0.1.16-webview.1` in the UI/About page, while satisfying macOS Info.plist version-field constraints.
+- [ ] **Explicit shared-home concurrency behavior:** `src/control.rs` uses `<app_dir>/herdr-app.sock` and `raise_running()` enforces **one active Herdr instance per config home**, regardless of app bundle name. Thus both apps may be installed, but cannot be expected to operate as two independent concurrent windows against the same data. Preserve this single-owner behavior and test a second launch; do not duplicate socket files merely to bypass it or allow concurrent writes to the same config.
+- [ ] Update all hard-coded macOS bundle/package/update installer references together, especially `scripts/package` (bundle + tar root + plist), `src/update.rs::PACKED`, DMG assembly, and any custom installation scripts. The updater must correctly recognize/extract `Herdr WebView.app` without overwriting `Herdr.app`, and still use only the fork's own GitHub update feed.
+- [ ] Acceptance: Dock tooltip says **Herdr WebView**; original icon unchanged; Settings/Mods/layout load from the **same Herdr home**; both app bundles can exist on disk; only one process owns the shared-home control socket; the fork update correctly replaces only `Herdr WebView.app`; no Apple signing credentials are required.
 
 ## Workstream C — In-app updater
 
@@ -160,7 +175,7 @@ In #8 the Rust cache archive was **~2.26 GB compressed**. Restore + save account
 - [ ] New upstream changes preserve Browser tab, address UI, navigation and original icon; conflicts and dependency breaks block release with a visible log.
 - [ ] Rust unit tests cover valid/invalid URLs, version comparisons (especially numeric webview revisions), manifest format, invalid/foreign URLs and integrity failures.
 - [ ] **Real macOS WebView E2E** creates a Browser tab, serves a deterministic local fixture, loads real HTML inside the tab, navigates to a second page, tests back/forward/reload, tab switching and clean close; generic GPU screenshot tests alone are insufficient.
-- [ ] Packaging tests verify original icon, .app bundle contents, ad-hoc code signature, license/third-party notices, archive/manifest SHA-256, and correct fork update feed.
+- [ ] Packaging tests verify original icon, **Herdr WebView.app Dock/Finder identity**, .app bundle contents, shared config home, single-instance socket behavior, ad-hoc code signature, license/third-party notices, archive/manifest SHA-256, and correct fork update feed.
 - [ ] App update integration tests verify newer release stage/restart/rollback and failure cases: wrong checksum, older version, malformed manifest, network failures and missing assets; plus weekly rolling cadence and missed-week catch-up scenarios.
 - [ ] Release step runs only when required checks pass; only macOS ARM64 deliverables, no Apple certificate/notarization secret required.
 - [ ] A newly installed fork checks only its GitHub Release and never downloads the official Herdr app.
@@ -178,12 +193,12 @@ In #8 the Rust cache archive was **~2.26 GB compressed**. Restore + save account
 
 ## Implementation prompt for coding agent
 
-> Implement the above plan against the **actual** `TonyPythoneer/herdr-webview` code and latest upstream stable Git tag. Preserve the original icon and do not introduce Apple Developer ID signing or notarization. Keep browser rendering inside existing GPUI Tab/Pane and minimize modifications to upstream. Add default-branch tag polling, safe upstream integration with conflict-blocking PRs, macOS-only CI, deterministic real browser UI tests, and a fork-only GitHub Releases update feed using the existing Herdr auto-updater with stable versioning and SHA-256. Release both a manually installable DMG and auto-updater tar.gz/manifest, but only after all tests pass. Never replace a fork app with an upstream app; retain rollback and explicit restart UX. Do not claim success until checks run green on GitHub Actions. Submit reviewable PRs and preserve full build logs. **Before other changes, optimize the existing CI**: commit the resolved Cargo.lock, use stable toolchain/dependency cache keys without run_number, only save cache on verified misses from trusted builds, skip expensive jobs/release for docs-only pushes without breaking required checks, and report measured timing. Do not remove browser E2E gates.
+> Implement the above plan against the **actual** `TonyPythoneer/herdr-webview` code and latest upstream stable Git tag. Preserve the original icon, use the macOS display name **Herdr WebView**, and retain the *original Herdr configuration paths and settings* (not a new app-specific home). Use a distinct macOS bundle identifier to prevent app identity conflicts, but keep the shared-home single-instance rule. Do not introduce Apple Developer ID signing or notarization. Keep browser rendering inside existing GPUI Tab/Pane and minimize modifications to upstream. Add default-branch tag polling, safe upstream integration with conflict-blocking PRs, macOS-only CI, deterministic real browser UI tests, and a fork-only GitHub Releases update feed using the existing Herdr auto-updater with stable versioning and SHA-256. Release both a manually installable DMG and auto-updater tar.gz/manifest, but only after all tests pass. Never replace a fork app with an upstream app; retain rollback and explicit restart UX. Do not claim success until checks run green on GitHub Actions. Submit reviewable PRs and preserve full build logs. **Before other changes, optimize the existing CI**: commit the resolved Cargo.lock, use stable toolchain/dependency cache keys without run_number, only save cache on verified misses from trusted builds, skip expensive jobs/release for docs-only pushes without breaking required checks, and report measured timing. Do not remove browser E2E gates.
 
 ## Review decisions
 
 - [ ] Automatic release after green CI, but conflicts always require manual review: **recommended**.
-- [ ] Original official Herdr and fork can coexist on the same macOS machine? If yes, use an independent Bundle ID and app name (icon remains unchanged).
+- [x] App identity decision: **Herdr WebView** in Finder/Dock, distinct macOS bundle ID, unchanged original icon, shared Herdr config home; both bundles may be installed but cannot simultaneously own the same config socket.
 - [ ] Poll intervals: upstream Git tags **once per week** (GitHub Actions, Mondays 03:23 UTC; `workflow_dispatch` for on-demand checks); **local WebView App update feed once per 7 days, catching up at the next launch after a missed due date**, not hourly.
 
 ## Tracking
