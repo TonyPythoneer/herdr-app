@@ -36,6 +36,7 @@ fancy-regex = "0.19"
 regex = "1"
 notify = "7"
 sha2 = "0.10"
+url = "2"
 
 [[test]]
 name = "shot_pixels"
@@ -57,6 +58,9 @@ tiny-skia = { version = "=0.11.4", default-features = false, features = ["std", 
 gpui_linux = { package = "gpui-pre-linux", version = "=0.3.8", features = ["render-to-image"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+gpui-wry = "=0.7.2"
+wry = { package = "lb-wry", version = "=0.53.3" }
+raw-window-handle = "0.6"
 gpui_macos = { package = "gpui-pre-macos", version = "=0.3.8", features = ["render-to-image"] }
 libc = "0.2"
 objc2 = "0.6"
