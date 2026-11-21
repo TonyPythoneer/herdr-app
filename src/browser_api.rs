@@ -34,7 +34,7 @@ fn locator(args: &Value) -> Result<&Value,String> {
     Ok(v)
 }
 
-const DOM_HELPERS: &str = r#"
+pub(crate) const DOM_HELPERS: &str = r#"
 const value=t;
 const visible=e=>{
   const b=e.getBoundingClientRect(),s=getComputedStyle(e);
