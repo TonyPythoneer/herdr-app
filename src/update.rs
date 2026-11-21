@@ -45,7 +45,9 @@ fn find_root() -> Option<PathBuf> {
 }
 
 /// The folder or bundle name inside a release tarball.
-const PACKED: &str = if cfg!(target_os = "macos") { "Herdr.app" } else { "herdr-app" };
+const PACKED: &str = if cfg!(target_os = "macos") {
+    if option_env!("HERDR_BROWSER_FORK").is_some() { "Herdr WebView.app" } else { "Herdr.app" }
+} else { "herdr-app" };
 
 fn beside(root: &Path, suffix: &str) -> PathBuf {
     let mut name = root.file_name().unwrap_or_default().to_os_string();

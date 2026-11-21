@@ -12,21 +12,76 @@ use uds_windows::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::time::Duration;
 
+#[cfg(target_os = "macos")]
+struct HomeClaim {
+    listener: Option<UnixListener>,
+    _lock: std::fs::File,
+}
+#[cfg(target_os = "macos")]
+static HOME_CLAIM: std::sync::Mutex<Option<HomeClaim>> = std::sync::Mutex::new(None);
+
+/// Reserve the shared home before reading settings or opening a window.
+/// The advisory lock serializes fork-vs-fork launches; the socket also detects
+/// a normal official Herdr instance which does not participate in our lock.
+#[cfg(target_os = "macos")]
+fn claim_home_at(path: &std::path::Path) -> Result<HomeClaim, String> {
+    use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
+    let occupied = || "Herdr is already running. Quit it before opening Herdr WebView.".to_owned();
+    if UnixStream::connect(path).is_ok() { return Err(occupied()); }
+    let parent = path.parent().ok_or("invalid Herdr config home")?;
+    std::fs::create_dir_all(parent).map_err(|e| format!("cannot prepare shared home: {e}"))?;
+    let lock_path = path.with_extension("webview.lock");
+    let lock = std::fs::OpenOptions::new().read(true).write(true).create(true)
+        .mode(0o600).custom_flags(libc::O_NOFOLLOW).open(&lock_path)
+        .map_err(|e| format!("cannot open WebView owner lock: {e}"))?;
+    lock.try_lock().map_err(|_| occupied())?;
+    // Recheck while holding the lock to narrow races with the official app.
+    if UnixStream::connect(path).is_ok() { return Err(occupied()); }
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        if !meta.file_type().is_socket() {
+            return Err("refusing to replace a non-socket at Herdr's control path".into());
+        }
+        std::fs::remove_file(path).map_err(|e| format!("cannot clear stale control socket: {e}"))?;
+    }
+    let listener = UnixListener::bind(path).map_err(|e| format!("cannot claim shared Herdr socket: {e}"))?;
+    Ok(HomeClaim { listener: Some(listener), _lock: lock })
+}
+
+#[cfg(target_os = "macos")]
+pub fn claim_home() -> Result<(), String> {
+    let claim = claim_home_at(&socket())?;
+    *HOME_CLAIM.lock().unwrap() = Some(claim);
+    Ok(())
+}
+
 fn socket() -> PathBuf {
     mods::app_dir().join("herdr-app.sock")
 }
 
-/// Serves the socket for this window. A live socket means another window owns this home.
+/// Serves the socket for this window. WebView release builds must use
+/// the already-owned listener; they cannot silently proceed with no socket.
 pub fn listen(tx: async_channel::Sender<Request>) {
-    let path = socket();
-    if UnixStream::connect(&path).is_ok() {
-        tracing::warn!("another Herdr is serving {}; `herdr-app do` goes there", path.display());
-        return;
-    }
-    let _ = std::fs::remove_file(&path);
-    let listener = match UnixListener::bind(&path) {
-        Ok(l) => l,
-        Err(e) => return tracing::warn!("cannot serve {}: {e}", path.display()),
+    #[cfg(target_os = "macos")]
+    let prebound = if option_env!("HERDR_BROWSER_FORK").is_some() {
+        Some(HOME_CLAIM.lock().unwrap().as_mut()
+            .and_then(|claim| claim.listener.take())
+            .expect("WebView startup must own its shared-home socket"))
+    } else { None };
+    #[cfg(not(target_os = "macos"))]
+    let prebound: Option<UnixListener> = None;
+    let listener = if let Some(listener) = prebound {
+        listener
+    } else {
+        let path = socket();
+        if UnixStream::connect(&path).is_ok() {
+            tracing::warn!("another Herdr is serving {}; `herdr-app do` goes there", path.display());
+            return;
+        }
+        let _ = std::fs::remove_file(&path);
+        match UnixListener::bind(&path) {
+            Ok(l) => l,
+            Err(e) => return tracing::warn!("cannot serve {}: {e}", path.display()),
+        }
     };
     let _ = std::thread::Builder::new().name("herdr-app-control".into()).spawn(move || {
         for stream in listener.incoming().flatten() {
@@ -189,6 +244,33 @@ mod tests {
     fn flag_values_that_parse_as_json_are_json() {
         let args: Vec<String> = ["--name", "eng-123", "--focus", "false", "--argv", r#"["claude"]"#].map(String::from).into();
         assert_eq!(parse_args(&args).unwrap(), json!({ "name": "eng-123", "focus": false, "argv": ["claude"] }));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn fork_claim_refuses_second_owner_and_recovers_stale_socket() {
+        let dir = std::env::temp_dir().join(format!("herdr-fork-owner-{}-{:?}",
+            std::process::id(), std::thread::current().id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("herdr-app.sock");
+        let first = claim_home_at(&path).unwrap();
+        assert!(claim_home_at(&path).is_err(), "second owner must be rejected");
+        drop(first);
+        let recovered = claim_home_at(&path).unwrap();
+        drop(recovered);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn fork_claim_refuses_to_unlink_unrelated_files() {
+        let dir = std::env::temp_dir().join(format!("herdr-fork-non-socket-{}",std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("herdr-app.sock");
+        std::fs::write(&path,"keep me").unwrap();
+        assert!(claim_home_at(&path).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(),"keep me");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
