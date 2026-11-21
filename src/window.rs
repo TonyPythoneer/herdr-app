@@ -3282,8 +3282,9 @@ impl AppWindow {
                     Ok(url) => url,
                     Err(error) => return self.fail(error),
                 };
-                self.answer(self.new_mod_tab(Self::owned(a, "space"), Self::arg(a, "name").unwrap_or("Browser"),
-                    crate::browser::MOD_NAME.to_owned(), json!({"url": url}), focus));
+                let result = self.new_mod_tab(Self::owned(a, "space"), Self::arg(a, "name").unwrap_or("Browser"),
+                    crate::browser::MOD_NAME.to_owned(), json!({"url": url}), focus);
+                self.answer(result);
             }
             "browser.navigate" => {
                 let Some(input) = Self::arg(a, "url") else { return self.fail("browser.navigate needs url") };
@@ -4860,9 +4861,10 @@ impl AppWindow {
                 Err(error) => { self.browser_errors.insert(id.clone(), error); continue; }
             };
             if let Some(view) = self.browser_views.get(&id) {
+                let needs_navigation = self.browser_urls.get(&id) != Some(&url);
                 view.update(cx, |v, _| {
                     if !v.visible() { v.show(); }
-                    if self.browser_urls.get(&id) != Some(&url) { v.load_url(&url); }
+                    if needs_navigation { v.load_url(&url); }
                 });
                 self.browser_urls.insert(id, url);
                 continue;
