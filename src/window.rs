@@ -4911,12 +4911,7 @@ impl AppWindow {
         for id in stale_chrome { self.chrome_views.remove(&id); }
         self.browser_errors.retain(|id, _| owned.contains_key(id));
         for (id, desired) in owned {
-            if !visible.contains(&id) {
-                if let Some(view) = self.browser_views.get(&id) {
-                    view.update(cx, |v, _| { if v.visible() { v.hide(); } });
-                }
-                continue;
-            }
+            let pane_visible = visible.contains(&id);
             let (engine, url) = match desired {
                 Ok(info) => info,
                 Err(error) => {
@@ -4936,11 +4931,24 @@ impl AppWindow {
                 self.browser_urls.remove(&id);
                 self.browser_errors.remove(&id);
                 if let Some(view) = self.chrome_views.get(&id) {
-                    view.update(cx, |v, cx| v.navigate(&url, cx));
+                    view.update(cx, |v, cx| {
+                        v.set_visible(pane_visible);
+                        v.navigate(&url, cx);
+                    });
                 } else {
                     let pane_id = id.clone();
-                    self.chrome_views.insert(id, cx.new(|cx|
-                        crate::chrome_view::ChromeView::new(pane_id, url, cx)));
+                    let view = cx.new(|cx|
+                        crate::chrome_view::ChromeView::new(pane_id, url, cx));
+                    if !pane_visible {
+                        view.update(cx, |v, _| v.set_visible(false));
+                    }
+                    self.chrome_views.insert(id, view);
+                }
+                continue;
+            }
+            if !pane_visible {
+                if let Some(view) = self.browser_views.get(&id) {
+                    view.update(cx, |v, _| { if v.visible() { v.hide(); } });
                 }
                 continue;
             }

@@ -19,6 +19,8 @@ pub struct ChromeView {
     focus: FocusHandle,
     bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
     viewport: Arc<AtomicU64>,
+    mouse_pressed: bool,
+    visible: bool,
     _load: Option<Task<()>>,
     _frames: Option<Task<()>>,
 }
@@ -57,6 +59,9 @@ impl ChromeView {
                                 }
                             }
                         }));
+                        if !this.visible {
+                            let _ = session.post("Page.stopScreencast", json!({}));
+                        }
                         this.session = Some(session);
                         this.error = None;
                     }
@@ -68,7 +73,7 @@ impl ChromeView {
         Self {
             pane_id, url, session: None, frame: None, error: None,
             focus: cx.focus_handle(), bounds: Rc::new(RefCell::new(None)),
-            viewport: Arc::new(AtomicU64::new(0)),
+            viewport: Arc::new(AtomicU64::new(0)), mouse_pressed: false, visible: true,
             _load: Some(loader), _frames: None,
         }
     }
@@ -118,13 +123,36 @@ impl ChromeView {
         (x >= 0.0 && y >= 0.0 && x < width && y < height).then_some((x as f64, y as f64))
     }
 
-    fn click(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    /// Pause live frame capture while a tab is hidden; the Chrome target and
+    /// its DOM remain alive for background navigation and Agent operations.
+    pub fn set_visible(&mut self, visible: bool) {
+        if self.visible == visible { return }
+        self.visible = visible;
+        if let Some(session) = &self.session {
+            let (method, args) = if visible {
+                ("Page.startScreencast", json!({"format":"png","everyNthFrame":1}))
+            } else {
+                ("Page.stopScreencast", json!({}))
+            };
+            let _ = session.post(method, args);
+        }
+    }
+
+    fn mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.focus.focus(window, cx);
         let Some((x, y)) = self.relative(ev.position) else { return };
         let Some(pane) = &self.session else { return };
-        // CDP messages share the private pipe. Never expose an external port.
         let _ = pane.post("Input.dispatchMouseEvent",
             json!({"type":"mousePressed","x":x,"y":y,"button":"left","clickCount":1}));
+        self.mouse_pressed = true;
+        cx.stop_propagation();
+    }
+
+    fn mouse_up(&mut self, ev: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.mouse_pressed { return }
+        self.mouse_pressed = false;
+        let Some((x, y)) = self.relative(ev.position) else { return };
+        let Some(pane) = &self.session else { return };
         let _ = pane.post("Input.dispatchMouseEvent",
             json!({"type":"mouseReleased","x":x,"y":y,"button":"left","clickCount":1}));
         cx.stop_propagation();
@@ -222,7 +250,8 @@ impl Render for ChromeView {
             .size_full().relative().bg(rgb(0xffffff))
             .track_focus(&self.focus)
             .key_context("Chrome")
-            .on_mouse_down(MouseButton::Left, cx.listener(Self::click))
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_mouse_move(cx.listener(Self::move_pointer))
             .on_scroll_wheel(cx.listener(Self::wheel))
             .on_key_down(cx.listener(Self::key))
