@@ -47,9 +47,11 @@ pub const COMMANDS: &[Command] = &[
     cmd("terminal.right_click", &[req("to"), opt("terminal")], "Where right-clicks in a terminal (default: the focused one) go when its program takes the mouse: \"program\" or \"menu\" (Herdr's, the default). Shift+right-click is always the menu."),
     cmd("terminal.pin", &[req("terminal"), req("pinned")], "Pin an agent to the top of the agent lists (pinned true) or unpin it (false). Pins are kept with the terminal, so every Herdr client shows them, and end with it."),
     cmd("terminal.kill", &[req("terminal")], "End a terminal and its sub-agents."),
-    // Native WKWebView panes, sharing Herdr's existing tab model.
-    cmd("browser.open", &[opt("url"), opt("name"), opt("space"), opt("focus")],
-        "Open a native macOS WebView as a tab in the selected space (url default: https://example.com)."),
+    // Browser panes share Herdr's upstream tab model; the backend can vary.
+    cmd("browser.capabilities", &[],
+        "Report browser engines actually available in this build and the new-tab default."),
+    cmd("browser.open", &[opt("url"), opt("name"), opt("space"), opt("focus"), opt("engine")],
+        "Open a Browser tab. Engine may be auto, wkwebview, or chrome-cdp; unavailable explicit engines fail rather than silently changing backends."),
     cmd("browser.navigate", &[opt("url"), opt("pane")],
         "Navigate a browser pane to an http(s) URL; defaults to the shown browser pane."),
     cmd("browser.address", &[opt("pane")], "Open a URL input dialog for the shown browser pane."),
