@@ -460,7 +460,7 @@ mod tests {
         let profile = std::env::temp_dir().join(format!("herdr-chrome-e2e-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros()));
         let binary = discover().expect("Chrome must be installed for required CDP E2E");
         let client = Client::start(&binary, &profile).expect("Chrome CDP pipe must connect");
-        let pane = client.open(&format!("http://{address}/")).expect("CDP target must open");
+        let pane = Arc::new(client.open(&format!("http://{address}/")).expect("CDP target must open"));
         let mut title = Value::Null;
         for _ in 0..60 {
             title = pane.eval("document.title").unwrap_or(Value::Null);
@@ -478,6 +478,43 @@ mod tests {
         pane.eval("document.querySelector('#text').focus()").unwrap();
         pane.insert_text("Herdr CDP input").unwrap();
         assert_eq!(pane.eval("document.querySelector('#text').value").unwrap(), "Herdr CDP input");
+
+        // API tests run against the same real Chrome target, not a mock CDP.
+        let cancelled = AtomicBool::new(false);
+        let query = crate::browser_api::run(&pane, "browser.query",
+            &json!({"target":{"css":"button#click"}}), false, &cancelled)
+            .expect("Chrome query over the real page");
+        assert_eq!(query["count"], 1);
+        assert_eq!(query["elements"][0]["tag"], "button");
+        let snapshot = crate::browser_api::run(&pane, "browser.snapshot",
+            &json!({"max_nodes":50}), false, &cancelled)
+            .expect("Chrome DOM snapshot");
+        assert_eq!(snapshot["title"], "Herdr fixture");
+        assert!(snapshot["elements"].as_array().is_some_and(|v| !v.is_empty()));
+        let error = crate::browser_api::run(&pane, "browser.eval",
+            &json!({"expression":"document.title"}), false, &cancelled)
+            .expect_err("arbitrary JavaScript must require native user approval");
+        assert!(error.starts_with("APPROVAL_REQUIRED"));
+        let error = crate::browser_api::run(&pane, "browser.click",
+            &json!({"target":{"css":"button#click"}}), false, &cancelled)
+            .expect_err("uncertain action must require native approval");
+        assert!(error.starts_with("APPROVAL_REQUIRED"));
+        assert_eq!(crate::browser_api::run(&pane, "browser.click",
+            &json!({"target":{"css":"button#click"}}), true, &cancelled)
+            .expect("native approved click")["clicked"], true);
+        assert_eq!(crate::browser_api::run(&pane, "browser.fill",
+            &json!({"target":{"css":"#text"},"value":"Approved replacement"}), false, &cancelled)
+            .expect("native text replacement")["typed"], true);
+        assert_eq!(pane.eval("document.querySelector('#text').value").unwrap(), "Approved replacement");
+        let waited = crate::browser_api::run(&pane, "browser.wait",
+            &json!({"condition":{"selector":"#state","text":"clicked"},"timeout_ms":1000}),
+            false, &cancelled).expect("matched visible fixture");
+        assert_eq!(waited["matched"], true);
+        cancelled.store(true, AtomicOrdering::Release);
+        assert!(crate::browser_api::run(&pane, "browser.type",
+            &json!({"target":{"css":"#text"},"text":"must not type"}), true, &cancelled)
+            .expect_err("cancellation gate") .starts_with("CANCELLED"));
+
         drop(pane);
         drop(client);
         stop.store(true, AtomicOrdering::Relaxed);

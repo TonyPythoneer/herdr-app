@@ -1220,10 +1220,23 @@ An unavailable explicit engine returns an error. These commands are fork-specifi
 
 - `browser.capabilities` — report the available engines and new-tab default.
 - `browser.list` — report current Browser pane IDs, URLs and engine identifiers.
+- `browser.snapshot`, `browser.query`, `browser.inspect` — inspect bounded Chrome DOM data.
+- `browser.click`, `browser.click_at`, `browser.fill`, `browser.type`,
+  `browser.press`, `browser.scroll` — act on a Chrome pane with native CDP input.
+- `browser.wait` — wait for a selector, text or URL condition; `browser.eval` —
+  evaluate JavaScript after the person's explicit native approval.
+- `browser.screenshot` — save a true Chrome PNG in Herdr's private app home.
+- `browser.result` — poll a request by its unguessable ID; `browser.cancel` —
+  cancel or discard the request (dispatched input cannot be undone).
 - `browser.open` — create a Browser tab: `herdr-app do browser.open '{"url":"https://example.com","engine":"auto"}'`.
   Optional `engine`: `auto`, `wkwebview`, or `chrome-cdp`. The `auto` setting
   prefers a supported installed Chrome, falling back to WKWebView if unavailable.
-  Chrome CLI/MCP automation is not yet implemented; the CDP renderer is experimental.
+  The Chrome Agent CLI uses asynchronous requests. Always provide an explicit
+  `pane` from `browser.list`, then use `browser.result` to collect the result.
+  On `APPROVAL_REQUIRED`, only the real GPUI desktop confirmation can approve
+  that exact request; no CLI, mod, browser script or MCP command may approve it.
+  The Chrome Agent API is experimental. WKWebView Agent parity and MCP stdio
+  transport remain unimplemented; do not claim both backends offer parity.
 - `browser.navigate` — load a URL in a browser pane (optional `pane`), preserving
   the pane's engine and other saved properties.
 - `browser.address` — show the browser URL input dialog.

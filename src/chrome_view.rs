@@ -26,6 +26,11 @@ pub struct ChromeView {
 }
 
 impl ChromeView {
+    /// A Herdr pane owns one Chrome session and never reveals its raw CDP target.
+    pub fn session(&self) -> Option<Arc<Session>> {
+        self.session.clone()
+    }
+
     pub fn new(pane_id: String, url: String, cx: &mut Context<Self>) -> Self {
         let open_url = url.clone();
         let loader = cx.spawn(async move |this, cx| {
