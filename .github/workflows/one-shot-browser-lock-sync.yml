@@ -1,0 +1,52 @@
+# One-time maintenance: commit the resolved Cargo.lock from a previously
+# verified macOS browser CI run. Remove this workflow immediately afterwards.
+name: one-shot-browser-lock-sync
+
+on:
+  push:
+    branches: [work/pr0-browser-ci-foundation]
+    paths: [.github/workflows/one-shot-browser-lock-sync.yml]
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  restore-resolved-lock:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout the exact PR branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: work/pr0-browser-ci-foundation
+          persist-credentials: true
+
+      - name: Restore verified browser-resolved Cargo.lock artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/browser-lock"
+          gh run download 44897506287 \
+            --repo "${{ github.repository }}" \
+            --name browser-resolved-cargo-lock \
+            --dir "$RUNNER_TEMP/browser-lock"
+          test -s "$RUNNER_TEMP/browser-lock/Cargo.lock"
+          echo "3409e7f97a2f8688014a4d37ac4df508c3ed6acdde804ab8bab738240da630c0  $RUNNER_TEMP/browser-lock/Cargo.lock" | sha256sum -c -
+          grep -q '^name = "gpui-wry"$' "$RUNNER_TEMP/browser-lock/Cargo.lock"
+          grep -q '^name = "lb-wry"$' "$RUNNER_TEMP/browser-lock/Cargo.lock"
+          cp "$RUNNER_TEMP/browser-lock/Cargo.lock" Cargo.lock
+          git diff --check
+          test -n "$(git status --short Cargo.lock)"
+
+      - name: Commit pinned browser dependency resolution to PR branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.lock
+          git commit -m "build: pin resolved gpui-wry and lb-wry dependencies"
+          git push origin HEAD:refs/heads/work/pr0-browser-ci-foundation
