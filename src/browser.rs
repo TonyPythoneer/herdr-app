@@ -94,8 +94,8 @@ mod tests {
         ));
         let serialized = serde_json::to_value(&tab.root).unwrap();
         let restored: Node = serde_json::from_value(serialized).unwrap();
-        assert!(restored.is_pane());
         let item = restored.find("pane1").unwrap();
+        assert!(item.is_pane());
         match item.content().unwrap() {
             Content::Mod { name, props } => {
                 assert!(is_browser(name));
