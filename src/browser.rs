@@ -35,7 +35,7 @@ pub fn normalize_url(raw: &str) -> Result<String, String> {
     if !url.username().is_empty() || url.password().is_some() {
         return Err("embedded URL credentials are not allowed".into());
     }
-    Ok(url.into())
+    Ok(url.to_string())
 }
 
 pub fn url_from_props(props: &Value) -> Result<String, String> {
