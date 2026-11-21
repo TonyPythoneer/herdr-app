@@ -50,6 +50,7 @@ pub fn create(
     url: &str,
 ) -> Result<gpui::Entity<gpui_wry::WebView>, String> {
     use raw_window_handle::HasWindowHandle;
+    use gpui::AppContext as _;
     let url = normalize_url(url)?;
     let parent = window.window_handle().map_err(|e| format!("GPUI window handle unavailable: {e}"))?;
     let native = wry::WebViewBuilder::new()
