@@ -27,6 +27,8 @@ const RETRY: Duration = Duration::from_secs(30 * 60);
 // App releases for this fork must never come from releases.herdr.dev.
 // herdr-core continues using the original releases() source.
 const FORK_APP_FEED: &str = "https://github.com/TonyPythoneer/herdr-webview/releases/latest/download/latest.json";
+const FORK_CHECK_INTERVAL: u64 = 7 * 24 * 60 * 60;
+const FORK_CHECK_RETRY: u64 = 24 * 60 * 60;
 fn is_webview_fork() -> bool {
     cfg!(target_os = "macos") && option_env!("HERDR_BROWSER_FORK").is_some()
 }
@@ -108,6 +110,106 @@ static WAKE: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
 /// The checker runs (a release, or pointed at a test server), and is looking right now.
 static RUNNING: AtomicBool = AtomicBool::new(false);
 static CHECKING: AtomicBool = AtomicBool::new(false);
+static FORK_MANUAL: AtomicBool = AtomicBool::new(false);
+static FORK_WAKE: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
+
+#[derive(Clone, Copy, Default, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+struct ForkCheckState {
+    last_successful_app_update_check_at: Option<u64>,
+    last_attempt_at: Option<u64>,
+}
+
+fn fork_state_path() -> PathBuf {
+    crate::mods::app_dir().join("webview-app-update-check.json")
+}
+
+fn load_fork_state(path: &Path) -> ForkCheckState {
+    std::fs::read(path).ok().and_then(|data| serde_json::from_slice(&data).ok())
+        .unwrap_or_default()
+}
+
+fn save_fork_state(path: &Path, state: ForkCheckState) -> Result<(), String> {
+    use std::io::Write as _;
+    let parent = path.parent().ok_or("missing state directory")?;
+    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
+    #[cfg(unix)]
+    let mut file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600)
+            .open(&tmp).map_err(|e| e.to_string())?
+    };
+    #[cfg(not(unix))]
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true)
+        .open(&tmp).map_err(|e| e.to_string())?;
+    let result = (|| -> std::io::Result<()> {
+        file.write_all(&serde_json::to_vec(&state)?)?;
+        file.sync_all()?;
+        std::fs::rename(&tmp, path)
+    })();
+    if result.is_err() { let _ = std::fs::remove_file(tmp); }
+    result.map_err(|e| e.to_string())
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .map(|time| time.as_secs()).unwrap_or(0)
+}
+
+/// A successful check schedules the next check seven days later. Failed/
+/// offline attempts do NOT change that timestamp; they only add a 24h
+/// backoff. On first launch or after missing multiple weeks, run once.
+fn fork_check_delay(state: ForkCheckState, now: u64) -> Duration {
+    let normal_due = state.last_successful_app_update_check_at
+        .map(|t| t.saturating_add(FORK_CHECK_INTERVAL)).unwrap_or(0);
+    let retry_due = state.last_attempt_at
+        .map(|t| t.saturating_add(FORK_CHECK_RETRY)).unwrap_or(0);
+    Duration::from_secs(normal_due.max(retry_due).saturating_sub(now))
+}
+
+fn fork_sleep(duration: Duration) {
+    let signal = FORK_WAKE.0.lock().unwrap();
+    let (mut signal, _) = FORK_WAKE.1.wait_timeout_while(signal, duration, |s| !*s).unwrap();
+    *signal = false;
+}
+
+fn start_fork_app_check(root: PathBuf) {
+    std::thread::spawn(move || {
+        fork_sleep(Duration::from_secs(10));
+        let path = fork_state_path();
+        let mut state = load_fork_state(&path);
+        loop {
+            let manual = FORK_MANUAL.swap(false, Ordering::AcqRel);
+            let delay = if manual { Duration::ZERO } else { fork_check_delay(state, unix_now()) };
+            if delay > Duration::ZERO {
+                fork_sleep(delay);
+                continue;
+            }
+            CHECKING.store(true, Ordering::Relaxed);
+            state.last_attempt_at = Some(unix_now());
+            if let Err(e) = save_fork_state(&path, state) {
+                tracing::warn!("cannot persist WebView update attempt: {e}");
+            }
+            match check(&root) {
+                Ok(found) => {
+                    if let Some(version) = found { *READY.lock().unwrap() = Some(version); }
+                    let now = unix_now();
+                    state.last_successful_app_update_check_at = Some(now);
+                    *CHECKED.lock().unwrap() = Some(now);
+                }
+                Err(e) => {
+                    tracing::warn!("WebView app update check failed: {e}");
+                    crate::telemetry::count("app_update_failed");
+                }
+            }
+            if let Err(e) = save_fork_state(&path, state) {
+                tracing::warn!("cannot persist WebView update schedule: {e}");
+            }
+            CHECKING.store(false, Ordering::Relaxed);
+        }
+    });
+}
+
 
 pub fn core() -> CoreInfo {
     CORE.lock().unwrap().clone()
@@ -143,7 +245,14 @@ fn checks_core() -> bool {
 /// For the settings screen: both programs, what's waiting, when we last looked.
 pub fn status() -> serde_json::Value {
     serde_json::json!({
-        "app": { "version": env!("CARGO_PKG_VERSION"), "ready": ready(), "updates": checks_app().is_some() },
+        "app": {
+            "version": env!("CARGO_PKG_VERSION"),
+            "ready": ready(),
+            "updates": checks_app().is_some(),
+            "last_successful_app_update_check_at": if is_webview_fork() {
+                load_fork_state(&fork_state_path()).last_successful_app_update_check_at
+            } else { None },
+        },
         "notes": crate::update_notes::notes(ready().as_deref()),
         "core": core(),
         "checked": *CHECKED.lock().unwrap(),
@@ -155,6 +264,11 @@ pub fn status() -> serde_json::Value {
 pub fn check_now() {
     if RUNNING.load(Ordering::Relaxed) {
         CHECKING.store(true, Ordering::Relaxed);
+    }
+    if is_webview_fork() {
+        FORK_MANUAL.store(true, Ordering::Release);
+        *FORK_WAKE.0.lock().unwrap() = true;
+        FORK_WAKE.1.notify_all();
     }
     *WAKE.0.lock().unwrap() = true;
     WAKE.1.notify_all();
@@ -175,6 +289,13 @@ pub fn start() {
         return;
     }
     RUNNING.store(true, Ordering::Relaxed);
+    // Use two independent workers: the fork app checks GitHub once every
+    // seven days, while the core continues using upstream's hourly policy.
+    let app = if is_webview_fork() {
+        if let Some(root) = app { start_fork_app_check(root); }
+        None
+    } else { app };
+    if app.is_none() && !core { return; }
     CHECKING.store(true, Ordering::Relaxed);
     std::thread::spawn(move || {
         sleep(Duration::from_secs(10));
@@ -932,6 +1053,27 @@ mod tests {
             assert!(String::from_utf8_lossy(&path.stdout).contains("/opt/homebrew/bin"));
         }
         std::fs::remove_dir_all(work).unwrap();
+    }
+
+    #[test]
+    fn webview_schedule_is_persistent_with_catchup_and_offline_backoff() {
+        let mut state = ForkCheckState::default();
+        assert_eq!(fork_check_delay(state, 100), Duration::ZERO);
+        state.last_successful_app_update_check_at = Some(100);
+        state.last_attempt_at = Some(100);
+        assert_eq!(fork_check_delay(state, 100 + FORK_CHECK_INTERVAL - 1), Duration::from_secs(1));
+        assert_eq!(fork_check_delay(state, 100 + FORK_CHECK_INTERVAL), Duration::ZERO);
+        assert_eq!(fork_check_delay(state, 100 + 21 * 86400), Duration::ZERO);
+        state.last_attempt_at = Some(100 + FORK_CHECK_INTERVAL);
+        assert_eq!(fork_check_delay(state, 100 + FORK_CHECK_INTERVAL), Duration::from_secs(FORK_CHECK_RETRY));
+        assert_eq!(fork_check_delay(state, 100 + FORK_CHECK_INTERVAL + FORK_CHECK_RETRY), Duration::ZERO);
+        let dir = std::env::temp_dir().join(format!("herdr-fork-update-{}",std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.json");
+        save_fork_state(&path,state).unwrap();
+        assert_eq!(load_fork_state(&path),state);
+        assert_eq!(load_fork_state(&dir.join("absent.json")),ForkCheckState::default());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
