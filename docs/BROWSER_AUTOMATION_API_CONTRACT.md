@@ -218,3 +218,68 @@ Error results must include a human-readable message and `retryable` boolean; nev
 5. **CI promotion**: real macOS fixture tests and security/release gates must pass before the release can claim Agent-controllable WebView.
 
 **No assumptions of pre-existing support:** v1.0 is a normative *design target*. Record actual implementation status per command in the PR and only label commands `supported` once exercised through the shipped Agent interface on macOS.
+
+## 10. Chrome-like UI testing: feasibility boundaries, risk gates and safer defaults (2026-11-21)
+
+### 10.1 Protocol compatibility: precise commitment
+
+- **What is promised:** Playwright/Chrome-DevTools-like **Agent ergonomics** through a first-party Herdr `browser.*` JSON contract, command discovery and local MCP stdio tools controlling the **already displayed WKWebView**.
+- **What is not promised:** raw Chrome DevTools Protocol (CDP) WebSocket connectivity or drop-in support for `chromium.connectOverCDP()` / `playwright.connectOverCDP()`. WKWebView uses WebKit/JavaScriptCore, not Chromium CDP. WebKit Inspector/remote inspector does not mean stock WKWebView supports the full Playwright protocol or Chrome-only domains. Playwright's shipped WebKit is patched; even Playwright's internal stock-WebKit experiments are not a verified general macOS WKWebView driver.
+- **Technical feasibility gate (P0, before large implementation):** a minimal proof of concept must operate the *existing visible* GPUI child WKWebView through `herdr-app do`: JS evaluate-with-result, stable DOM querying, form input/click using a verified input path, a native WKWebView PNG capture, and post-action assertion. Measure Mac permissions and native-event `isTrusted` instead of assuming success. If native input cannot be made reliable with supported macOS APIs and the existing architecture, block the release and document the compatibility limitation; **do not claim Playwright-grade input automation based solely on `element.click()`.**
+
+### 10.2 Two distinct UI surfaces and test scope
+
+| Surface under test | Can Herdr WebView browser API test it? | Required test harness |
+| --- | --- | --- |
+| HTML/CSS/JS inside the embedded WKWebView | Yes, after bridge implementation | Herdr `browser.*`, DOM assertions, screenshot and native input checks |
+| Herdr GPUI tabs, pane split/resize, native toolbar/menu, permission dialogs and Dock behavior | **Not solely through page DOM/JS** | macOS AppKit/accessibility/UI event harness plus real displayed WebView for integration |
+| OS dialogs, Safari/Chrome or arbitrary external apps | Not supported by the WebView browser API | Separate native/OS automation only if deliberately scoped; never imply the browser API tests it |
+| Chrome-specific browser behavior | Not directly | Separate Chromium testing only if explicitly desired; not part of “same embedded WebView” guarantee |
+
+Mandatory tests target both: (A) **web-app behavior** in the real embedded WKWebView; (B) **native container integration** (focus, z-order, resize, split, close). Both tests run against the shipped Herdr WebView app, not a second hidden browser or Safari.
+
+### 10.3 Risk register and mitigations (normative)
+
+| Severity | Failure mode | Required mitigation and passing proof |
+| --- | --- | --- |
+| P0 | JS-dispatched `click()` passes a test but lacks **trusted user event** semantics | Use real native event delivery or a verified equivalent where possible; fixture records `isTrusted` and event sequence; document engine capability and report unsupported instead of false success |
+| P0 | Native macOS automation permissions / TCC block click, keyboard or screenshot on CI | Test actual macOS 15+ environment and required grants early; retain deterministic DOM-only coverage on standard macOS Actions and add **a trusted, configured macOS UI runner** for permission-requiring real-input gates if needed; do not bypass OS security or hide a skipped gate |
+| P0 | Agent changes production data or leaks secrets while “testing” | Default browser-test sessions to disposable nonpersistent website data, loopback/local fixture origin, staging/test accounts, explicit allowed origins and test-only credentials. Require explicit approval for irreversible real-site actions; never assume automatic detection of every destructive button is sufficient |
+| P0 | Page, frame or pane changes while an action is pending | Include `pane`, `document_id` and `snapshot_id` on all target mutations; cancel on navigation/close; require locators to uniquely identify one actionable element; never silently retarget or retry non-idempotent mutations |
+| P0 | Untrusted web content injects instructions or calls privileged Herdr API | Treat DOM/screenshot as **untrusted observations**, never command authorization; no privileged page→host IPC; restrict Unix socket permissions and verify same-user peer where feasible; keep MCP adapter attached to existing local session only |
+| P1 | WebView screenshot misses native pixels, is blank, clipped or captures another pane | Use native `WKWebView.takeSnapshot`, tag screenshot with pane/document/URL/viewport/scale/timestamp; check actual fixture text/marker pixels and exact dimensions; no implicit switch to GPUI window-only screenshot |
+| P1 | Flaky timing (SPA hydration, AJAX, animation, page load), leading to phantom success | Locator auto-wait for actionable state, bounded `browser.wait` and postcondition/assertions; serialize per-pane mutations, no arbitrary sleeps as primary synchronization. For visual diffs, normalize scaling/fonts/animations and document tolerance |
+| P1 | Cross-origin frames, closed shadow roots, popups, CAPTCHA or site defenses | Capability-detect and explicitly return `UNSUPPORTED_CAPABILITY`/`PERMISSION_DENIED`; do not promise universal iframe or protected-website automation; test same-origin basics separately |
+| P1 | Embedded browser test overwrites existing Herdr user data | Test app uses `HERDR_APP_HOME` pointing at an isolated temporary fixture; web profile is ephemeral; never run tests against the actual `~/.config/herdr-app` or production login cookies. **End-user application still reuses upstream config as requested** |
+| P1 | CI builds green but UI is broken after upstream release | Real native App UI + browser-automation fixture must be a hard release gate. Failed or unavailable required runner blocks release, creates/updates a diagnostic GitHub Issue and preserves last known good build |
+| P2 | Excessive screenshot/DOM output, stale artifacts or oversharing secrets | Bound text/images and concurrent tasks, redact password fields, mask sensitive test data, store captures in owner-only temporary paths, do not publish CI artifacts containing private production sessions |
+
+### 10.4 Observe → act → assert; not click-and-hope
+
+A passing browser UI test **must** demonstrate:
+1. Identify the exact visible `pane` and `document_id`; obtain a fresh accessibility-oriented snapshot or DOM lookup.
+2. Resolve one unique, interactable target using role/name/label/test-id (CSS only if necessary); reject stale/ambiguous references.
+3. Perform action using the documented input backend; record source `native` / `dom_synthetic` in result metadata and **never call an input event “trusted” without verification**.
+4. Await a **specific observable outcome** (URL, DOM state, visible content, updated input value, enabled state), not merely successful JS completion.
+5. Capture a native WebView screenshot when visual evidence is relevant; ensure evidence and assertion refer to the same pane/document.
+6. On timeout or uncertain completion, **observe again before retrying**. Do not replay purchase/submit/delete/payment or any other non-idempotent action automatically.
+
+API extension: `browser.assert` is recommended to explicitly support UI test postconditions (e.g. element visibility, text, URL or value). If not added as a command in v1.0, the test runner MUST implement equivalent structured assertions using `browser.query`/`browser.eval`, with machine-readable pass/fail and evidence. An automation returning `ok: true` is **not** itself a UI test pass.
+
+### 10.5 CI test pyramid and evidence
+
+1. **Schema/unit tests:** typed operation validation, locator ambiguity, request IDs, timeout, pending-action cancellation, permission denial, never-implicit cross-pane behavior.
+2. **Web integration on a visible embedded WKWebView:** local deterministic HTTP fixture, DOM, fill, click, JS return, navigation, native PNG capture, explicit DOM+visual assertions. Can run on macOS-hosted GitHub Actions only after the environment is proven capable of exercising WebKit.
+3. **Native macOS input and container UI tests:** real pointer/keyboard events, focus, scroll, split/resizing, overlay/dialog z-order, app single-instance. Mac UI accessibility/test permission availability must be **verified**, not assumed; move permission-dependent gates to a trusted configured macOS runner if needed.
+4. **Upstream-sync release gate:** no screenshot-only or mock-only substitute for the real browser tests. Summaries include test case status, engine/backend/version, pane/document, input backend, failures and redacted evidence. Missing UI runner or skipped mandatory native test ⇒ **no stable release**, open a diagnostic Issue.
+
+### 10.6 Decisions assumed unless the user requests otherwise
+
+- **First release:** test and automate web UI *inside* Herdr; also verify the native Herdr container's integration using macOS native UI testing (not webpage JS).
+- **Priority:** correctness and reproducibility over raw CDP compatibility. Do not implement a fake CDP server.
+- **Test state:** isolated fixture/staging profile by default; production sessions not used in unattended UI tests.
+- **Manual/native permissions:** no Apple Developer certificate required for packaging; this does **not** imply Accessibility/TCC input permissions are automatically granted.
+- **Approval:** ordinary local site exploration and staging UI checks can run unattended; high-impact transactions on live accounts require explicit approval by the Agent's applicable permission layer.
+
+References: [Apple WKWebView](https://developer.apple.com/documentation/webkit/wkwebview), [WKSnapshotConfiguration](https://developer.apple.com/documentation/webkit/wksnapshotconfiguration), [Playwright MCP snapshots](https://playwright.dev/mcp/snapshots), [Playwright browsers](https://playwright.dev/docs/browsers), [WebKit contributor notes on WebDriver BiDi and UI testing](https://docs.webkit.org/Other/Contributor%20Meetings/ContributorMeeting2025.html), [Apple inspectable WebViews](https://webkit.org/blog/13936/enabling-the-inspection-of-web-content-in-apps/).
+
