@@ -3,6 +3,10 @@ use gpui_shell::action::ShellAction;
 
 actions!(herdr, [Quit, Hide, HideOthers, ShowAll, Settings]);
 
+fn app_name() -> &'static str {
+    if option_env!("HERDR_BROWSER_FORK").is_some() { "Herdr WebView" } else { "Herdr" }
+}
+
 pub fn init(cx: &mut App) {
     cx.on_action(|_: &Quit, cx| cx.quit());
     cx.on_action(|_: &Hide, cx| cx.hide());
@@ -69,7 +73,7 @@ pub(crate) fn menus(layouts: &[String], shown: Option<&str>) -> Vec<Menu> {
         .map(|name| command(name, &format!("layout.switch:{name}")).checked(Some(name.as_str()) == shown))
         .chain([MenuItem::separator(), command("Next Layout", "layout.switch")]);
     vec![
-        Menu::new("Herdr").items([
+        Menu::new(app_name()).items([
             command("What's New", "app.whats_new"),
             command("Check for Updates…", "app.settings:updates"),
             MenuItem::separator(),
@@ -77,11 +81,11 @@ pub(crate) fn menus(layouts: &[String], shown: Option<&str>) -> Vec<Menu> {
             MenuItem::separator(),
             MenuItem::os_submenu("Services", SystemMenuType::Services),
             MenuItem::separator(),
-            command("Hide Herdr", "app.hide"),
+            command(&format!("Hide {}", app_name()), "app.hide"),
             command("Hide Others", "app.hide_others"),
             command("Show All", "app.show_all"),
             MenuItem::separator(),
-            command("Quit Herdr", "app.quit"),
+            command(&format!("Quit {}", app_name()), "app.quit"),
         ]),
         Menu::new("File").items([
             command("New Tab", "tab.new"),

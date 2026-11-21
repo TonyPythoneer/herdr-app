@@ -139,7 +139,7 @@ fn main() {
     // Anything else from a shell answers in the shell; only a bare launch opens the window.
     match args.get(1).map(String::as_str) {
         // Already open on this home: that window comes to the front.
-        None if control::raise_running() => return,
+        None if option_env!("HERDR_BROWSER_FORK").is_none() && control::raise_running() => return,
         None => {}
         Some("-h" | "--help" | "help") => return print!("{HELP}"),
         Some("--skill") => return print!("{}", include_str!("SKILL.md")),
@@ -148,6 +148,16 @@ fn main() {
             eprint!("herdr-app: unknown argument {other:?}\n\n{HELP}");
             std::process::exit(2);
         }
+    }
+
+    // Claim exclusive control before the first settings, workspace or updater write.
+    // A running official Herdr must not be raised by this fork.
+    #[cfg(target_os = "macos")]
+    if option_env!("HERDR_BROWSER_FORK").is_some()
+        && let Err(error) = control::claim_home()
+    {
+        eprintln!("Herdr WebView: {error}");
+        return;
     }
 
     #[cfg(target_os = "macos")]
@@ -255,7 +265,7 @@ pub fn open_main(core: std::sync::Arc<hc::Core>, requests: async_channel::Receiv
                 // macOS: always see-through, so a layout can draw its own title bar
                 // live; the app drags the window (window/titlebar.rs).
                 titlebar: Some(TitlebarOptions {
-                    title: Some("Herdr".into()),
+                    title: Some(if option_env!("HERDR_BROWSER_FORK").is_some() { "Herdr WebView".into() } else { "Herdr".into() }),
                     // Windows: hidden for good (it can't change live); the app draws it.
                     appears_transparent: cfg!(any(target_os = "macos", windows)),
                     traffic_light_position: cfg!(target_os = "macos").then(|| point(px(12.0), px(7.0))),
@@ -266,7 +276,7 @@ pub fn open_main(core: std::sync::Arc<hc::Core>, requests: async_channel::Receiv
                 // it to 20x20; turning it on later (a "system" layout) is fine.
                 window_decorations: Some(WindowDecorations::Client),
                 // Herdr Dev and other side-by-side builds get their own dock icon.
-                app_id: Some(std::env::var("HERDR_APP_ID").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "herdr-app".into())),
+                app_id: Some(std::env::var("HERDR_APP_ID").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| if option_env!("HERDR_BROWSER_FORK").is_some() { "dev.herdr.webview".into() } else { "herdr-app".into() })),
                 ..Default::default()
             };
             cx.open_window(options, |window, cx| cx.new(|cx| window::AppWindow::new(core, requests, window, cx)))

@@ -70,20 +70,27 @@ if [[ $os == linux || $os == windows ]]; then
   notices_path=herdr-app/THIRD-PARTY-NOTICES
   tar -czf "$out" -C "$work" herdr-app
 else
-  app="$work/Herdr.app"
+  if [[ -n ${HERDR_BROWSER_FORK:-} ]]; then
+    app_name='Herdr WebView'
+    bundle_id='dev.herdr.webview'
+  else
+    app_name='Herdr'
+    bundle_id='dev.herdr.app'
+  fi
+  app="$work/$app_name.app"
   mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
   cp "$bin/herdr-app" "$app/Contents/MacOS/Herdr"
   cp assets/icons/Herdr.icns "$app/Contents/Resources/Herdr.icns"
   cp LICENSE THIRD-PARTY-NOTICES "$app/Contents/Resources/"
-  notices_path=Herdr.app/Contents/Resources/THIRD-PARTY-NOTICES
+  notices_path="$app_name.app/Contents/Resources/THIRD-PARTY-NOTICES"
   cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
     <key>CFBundleExecutable</key><string>Herdr</string>
-    <key>CFBundleIdentifier</key><string>dev.herdr.app</string>
-    <key>CFBundleName</key><string>Herdr</string>
-    <key>CFBundleDisplayName</key><string>Herdr</string>
+    <key>CFBundleIdentifier</key><string>$bundle_id</string>
+    <key>CFBundleName</key><string>$app_name</string>
+    <key>CFBundleDisplayName</key><string>$app_name</string>
     <key>CFBundleIconFile</key><string>Herdr</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>$version</string>
@@ -96,7 +103,7 @@ else
     <key>LSEnvironment</key><dict/></dict></plist>
 PLIST
   scripts/mac-sign "$app"
-  tar -czf "$out" -C "$work" Herdr.app
+  tar -czf "$out" -C "$work" "$app_name.app"
 fi
 tar -xOf "$out" "$notices_path" | cmp - THIRD-PARTY-NOTICES
 license_path="${notices_path%/*}/LICENSE"

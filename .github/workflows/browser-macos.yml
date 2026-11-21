@@ -126,10 +126,16 @@ jobs:
         run: |
           set -euo pipefail
           tar -xzf dist/herdr-app-macos-aarch64.tar.gz -C dist
+          app='dist/Herdr WebView.app'
+          test -f "$app/Contents/Info.plist"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$app/Contents/Info.plist")" = 'Herdr WebView'
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")" = 'dev.herdr.webview'
+          cmp assets/icons/Herdr.icns "$app/Contents/Resources/Herdr.icns"
+          codesign --verify --deep --strict "$app"
           mkdir -p dist/dmg-root
-          ditto dist/Herdr.app dist/dmg-root/Herdr.app
+          ditto "$app" 'dist/dmg-root/Herdr WebView.app'
           ln -s /Applications dist/dmg-root/Applications
-          hdiutil create -volname 'Herdr Browser' -srcfolder dist/dmg-root -format UDZO -ov dist/Herdr-Browser-macos-arm64.dmg
+          hdiutil create -volname 'Herdr WebView' -srcfolder dist/dmg-root -format UDZO -ov dist/Herdr-Browser-macos-arm64.dmg
           test -s dist/Herdr-Browser-macos-arm64.dmg
       - name: Upload macOS DMG artifact
         uses: actions/upload-artifact@v4
