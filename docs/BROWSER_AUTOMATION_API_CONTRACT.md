@@ -32,12 +32,12 @@ Existing surface is `herdr-app do <command> '<JSON arguments>'`, registered in `
 Examples **after implementation**:
 
 ```bash
-herdr-app do browser.open '{"url":"http://localhost:3210"}'
-herdr-app do browser.snapshot '{"pane":"pane_1","mode":"a11y"}'
-herdr-app do browser.click '{"pane":"pane_1","target":{"role":"button","name":"Search"}}'
-herdr-app do browser.fill '{"pane":"pane_1","target":{"label":"Search"},"value":"Herdr"}'
-herdr-app do browser.eval '{"pane":"pane_1","expression":"document.title"}'
-herdr-app do browser.screenshot '{"pane":"pane_1","scope":"viewport"}'
+# Planned API (not implemented): herdr-app do browser.open '{"url":"http://localhost:3210"}'
+# Planned API (not implemented): herdr-app do browser.snapshot '{"pane":"pane_1","mode":"a11y"}'
+# Planned API (not implemented): herdr-app do browser.click '{"pane":"pane_1","target":{"role":"button","name":"Search"}}'
+# Planned API (not implemented): herdr-app do browser.fill '{"pane":"pane_1","target":{"label":"Search"},"value":"Herdr"}'
+# Planned API (not implemented): herdr-app do browser.eval '{"pane":"pane_1","expression":"document.title"}'
+# Planned API (not implemented): herdr-app do browser.screenshot '{"pane":"pane_1","scope":"viewport"}'
 ```
 
 The IDs and responses above are illustrative, not evidence that the commands exist yet. Preserve the established `browser.open/navigate/back/forward/reload` names and behavior; add new commands without silently changing old call sites. The adapter exposes a **local MCP stdio tool server** as a separate optional executable backed by the *same* Herdr control socket so MCP-capable Agents can discover tools via `tools/list`. Implement that adapter before declaring cross-Agent MCP support; it must not spawn a separate unrelated browser session; it connects to the already selected Herdr pane, whose Chrome backend may itself manage a headless Chrome process. Document how to register it in supported Agent CLIs. Both transports use the same validated backend operation handlers and response schemas.
@@ -299,8 +299,8 @@ References: [Apple WKWebView](https://developer.apple.com/documentation/webkit/w
 Example (planned, **not implemented**):
 
 ~~~bash
-herdr-app do browser.open '{"url":"https://example.com","engine":"chrome-cdp"}'
-herdr-app do browser.snapshot '{"pane":"p1"}'
+# Planned API (not implemented): herdr-app do browser.open '{"url":"https://example.com","engine":"chrome-cdp"}'
+# Planned API (not implemented): herdr-app do browser.snapshot '{"pane":"p1"}'
 ~~~
 
 ~~~json
