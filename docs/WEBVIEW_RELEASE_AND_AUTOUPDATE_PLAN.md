@@ -20,7 +20,7 @@
 - CI: `.github/workflows/browser-macos.yml` currently triggers on pushes to this feature branch only.
 - `browser-ci-7` was a successful macOS CI/release with one experimental `.dmg`. It has **no updater tarball or latest.json** and does NOT prove real browser tab end-to-end behavior.
 - Fork `src/update.rs::checks_app()` currently disables app updates when `HERDR_BROWSER_FORK` is compiled in.
-- Original upstream `src/update.rs` already polls approximately hourly, verifies SHA-256, stages a `.tar.gz`, and provides restart/swap recovery. It currently reads `https://releases.herdr.dev/app/latest.json`.
+- Original upstream `src/update.rs` already currently polls approximately hourly (upstream baseline; the planned fork app check is weekly), verifies SHA-256, stages a `.tar.gz`, and provides restart/swap recovery. It currently reads `https://releases.herdr.dev/app/latest.json`.
 - The existing `tests/shot_pixels.rs` checks GPUI pixels, **not actual WKWebView navigation**.
 
 ## Architecture
@@ -48,7 +48,8 @@ Ad-hoc signed Herdr.app (ORIGINAL icon), updater .tar.gz, manual-install .dmg
 GitHub stable Release: assets published, latest.json / checksum published LAST
           |
           v
-Installed fork polls its OWN GitHub latest.json (~hourly)
+Installed fork checks OWN GitHub latest.json every 7 days while active;
+missed/offline due date -> catch up at next App launch
           |
           v
 SemVer compare => download .tar.gz => SHA256 => stage
@@ -89,6 +90,18 @@ Notify Restart to Update => safe replace / recovery if failed
 - [ ] GUI states: up-to-date, checking, new update available, downloading, ready to restart, error/retry. Do not silently quit a window with running agents or terminals.
 - [ ] First migration: currently installed `browser-ci-7` cannot self-update because updates were compiled out. **One manual upgrade** to the first updater-enabled release is necessary.
 - [ ] Ad-hoc/unnotarized updates may still encounter macOS Gatekeeper; do not promise zero prompts or advise disabling Gatekeeper.
+
+### Weekly, catch-up-on-launch update check policy (user decision)
+
+**This policy applies only to the locally installed WebView fork App, not to GitHub Actions' upstream tag polling.** The app does not need a background daemon, fixed weekday, OS scheduled task, or hourly GitHub network requests.
+
+- [ ] **Default: 7 days between successful update-feed checks** (rolling interval; no fixed Monday/Sunday). Record `last_successful_app_update_check_at` **persistently on disk**, including when no newer version is found.
+- [ ] On App **startup** and on returning from macOS **sleep / resume**, compare local time with the saved timestamp. If no successful check exists, or at least 7 days have elapsed, check the **fork's GitHub Release update feed** promptly. If the computer was off or the App closed on the due day, the first subsequent App launch checks then; missed weeks do **not** trigger multiple catch-up requests.
+- [ ] When the App remains running continuously, schedule a one-shot check for the next 7-day deadline (reschedule after each success); handle macOS wake and significant system-clock changes. Do not fetch GitHub every hour just to discover the deadline.
+- [ ] A failed/offline check must **not** reset the success timestamp. Persist `last_attempt_at` separately and apply a bounded retry backoff (for example 24 hours), with an explicit `Check for Updates Now` action that bypasses the schedule/backoff. Avoid rapid retry loops on repeated launches.
+- [ ] Keep `herdr-core` update policy independent. This weekly cadence is **not** permission to disable or slow core security/compatibility updates.
+- [ ] Tests: first launch, no-new-release success, 6d 23h (skip), >=7d (fetch once), powered-off for 10d followed by next launch (one catch-up fetch), multi-week absence (one fetch), App running across 7d boundary, sleep/wake, offline failure and 24h retry, and manual check.
+- [ ] **Constraint:** a Mac App cannot check while both the Mac is off and the App not running. “At least weekly” means **once per 7-day period while operating, or at the first available launch after missed due date**, not a guaranteed check during power-off.
 
 ## Workstream D — CI performance, cache correctness, and measured baseline
 
@@ -140,7 +153,7 @@ In #8 the Rust cache archive was **~2.26 GB compressed**. Restore + save account
 - [ ] Rust unit tests cover valid/invalid URLs, version comparisons (especially numeric webview revisions), manifest format, invalid/foreign URLs and integrity failures.
 - [ ] **Real macOS WebView E2E** creates a Browser tab, serves a deterministic local fixture, loads real HTML inside the tab, navigates to a second page, tests back/forward/reload, tab switching and clean close; generic GPU screenshot tests alone are insufficient.
 - [ ] Packaging tests verify original icon, .app bundle contents, ad-hoc code signature, license/third-party notices, archive/manifest SHA-256, and correct fork update feed.
-- [ ] App update integration tests verify newer release stage/restart/rollback and failure cases: wrong checksum, older version, malformed manifest, network failures and missing assets.
+- [ ] App update integration tests verify newer release stage/restart/rollback and failure cases: wrong checksum, older version, malformed manifest, network failures and missing assets; plus weekly rolling cadence and missed-week catch-up scenarios.
 - [ ] Release step runs only when required checks pass; only macOS ARM64 deliverables, no Apple certificate/notarization secret required.
 - [ ] A newly installed fork checks only its GitHub Release and never downloads the official Herdr app.
 - [ ] Report no Apple Developer signing: initial macOS Gatekeeper warning may occur.
@@ -163,7 +176,7 @@ In #8 the Rust cache archive was **~2.26 GB compressed**. Restore + save account
 
 - [ ] Automatic release after green CI, but conflicts always require manual review: **recommended**.
 - [ ] Original official Herdr and fork can coexist on the same macOS machine? If yes, use an independent Bundle ID and app name (icon remains unchanged).
-- [ ] Poll intervals: upstream every ~6 hours; local app hourly (same as existing Herdr).
+- [ ] Poll intervals: upstream Git tags every ~6 hours (GitHub Actions); **local WebView App update feed once per 7 days, catching up at the next launch after a missed due date**, not hourly.
 
 ## Tracking
 
