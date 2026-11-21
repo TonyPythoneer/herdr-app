@@ -175,6 +175,58 @@ End a terminal and its sub-agents.
 |---|---|
 | `terminal` | yes |
 
+## `browser.open`
+
+Open a native macOS WebView as a tab in the selected space (url default: https://example.com).
+
+| Argument | Required |
+|---|---|
+| `url` | no |
+| `name` | no |
+| `space` | no |
+| `focus` | no |
+
+## `browser.navigate`
+
+Navigate a browser pane to an http(s) URL; defaults to the shown browser pane.
+
+| Argument | Required |
+|---|---|
+| `url` | no |
+| `pane` | no |
+
+## `browser.address`
+
+Open a URL input dialog for the shown browser pane.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+
+## `browser.back`
+
+Back in the selected browser pane.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+
+## `browser.forward`
+
+Forward in the selected browser pane.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+
+## `browser.reload`
+
+Reload the selected browser pane.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+
 ## `space.select`
 
 Show a space (by position or id).
