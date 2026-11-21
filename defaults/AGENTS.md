@@ -1212,15 +1212,23 @@ including a small herdr-core skill you can install with the user's permission.
 
 ### Native browser tabs (macOS fork extension)
 
-These commands use a system WKWebView inside the existing Herdr tab and pane layout;
-they do not start Chromium or a new desktop window. They are fork-specific:
+Browser tabs use Herdr's existing tab and pane layout, not a second tab
+model or desktop window. In this build, only macOS WKWebView is implemented.
+Chrome CDP is reserved for a future adapter; choosing an unavailable engine
+returns an error rather than silently opening a different one. These commands
+are fork-specific:
 
-- `browser.open` — create a Browser tab: `herdr-app do browser.open '{"url":"https://example.com"}'`
-- `browser.navigate` — load an URL in a browser pane (optional `pane`).
+- `browser.capabilities` — report the available engines and new-tab default.
+- `browser.open` — create a Browser tab: `herdr-app do browser.open '{"url":"https://example.com","engine":"auto"}'`.
+  Optional `engine`: `auto`, `wkwebview`, or `chrome-cdp`. The `auto` setting
+  prefers Chrome only when its full backend is ready; currently it selects WKWebView.
+- `browser.navigate` — load a URL in a browser pane (optional `pane`), preserving
+  the pane's engine and other saved properties.
 - `browser.address` — show the browser URL input dialog.
 - `browser.back` — navigate back in history.
 - `browser.forward` — navigate forward in history.
 - `browser.reload` — reload the currently selected browser pane.
 
-The browser is backed by macOS WKWebView. Browser data stays in the native
-WebKit profile. These commands operate on the desktop UI process, not herdr-core.
+Legacy browser panes without an `engine` field remain on WKWebView. Browser
+data stays in the native WebKit profile. These commands operate on the desktop
+UI process, not herdr-core.

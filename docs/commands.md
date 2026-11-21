@@ -175,6 +175,65 @@ End a terminal and its sub-agents.
 |---|---|
 | `terminal` | yes |
 
+## `browser.capabilities`
+
+Report browser engines actually available in this build and the new-tab default.
+
+No arguments.
+
+## `browser.open`
+
+Open a Browser tab. Engine may be auto, wkwebview, or chrome-cdp; unavailable explicit engines fail rather than silently changing backends.
+
+| Argument | Required |
+|---|---|
+| `url` | no |
+| `name` | no |
+| `space` | no |
+| `focus` | no |
+| `engine` | no |
+
+## `browser.navigate`
+
+Navigate a browser pane to an http(s) URL; defaults to the shown browser pane.
+
+| Argument | Required |
+|---|---|
+| `url` | no |
+| `pane` | no |
+
+## `browser.address`
+
+Open a URL input dialog for the shown browser pane.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+
+## `browser.back`
+
+Back in the selected browser pane.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+
+## `browser.forward`
+
+Forward in the selected browser pane.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+
+## `browser.reload`
+
+Reload the selected browser pane.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+
 ## `space.select`
 
 Show a space (by position or id).
