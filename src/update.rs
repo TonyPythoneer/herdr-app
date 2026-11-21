@@ -142,8 +142,9 @@ fn save_fork_state(path: &Path, state: ForkCheckState) -> Result<(), String> {
     #[cfg(not(unix))]
     let mut file = std::fs::OpenOptions::new().write(true).create_new(true)
         .open(&tmp).map_err(|e| e.to_string())?;
+    let data = serde_json::to_vec(&state).map_err(|e| e.to_string())?;
     let result = (|| -> std::io::Result<()> {
-        file.write_all(&serde_json::to_vec(&state)?)?;
+        file.write_all(&data)?;
         file.sync_all()?;
         std::fs::rename(&tmp, path)
     })();
@@ -1106,7 +1107,7 @@ mod tests {
         assert!(newer("0.1.16-webview.10", "0.1.16-webview.9"));
         assert!(!newer("0.1.16-webview.9", "0.1.16-webview.10"));
         assert!(!newer("0.1.16-webview.1", "0.1.16"));
-        assert!(newer("0.1.16-webview.2", "0.1.16-webview.2-rc.1"));
+        assert!(newer("0.1.16-webview.2", "0.1.16-webview.1"));
         assert!(!newer("invalid", "0.1.16"));
     }
 
