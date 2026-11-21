@@ -20,7 +20,7 @@
 - CI: `.github/workflows/browser-macos.yml` currently triggers on pushes to this feature branch only.
 - `browser-ci-7` was a successful macOS CI/release with one experimental `.dmg`. It has **no updater tarball or latest.json** and does NOT prove real browser tab end-to-end behavior.
 - Fork `src/update.rs::checks_app()` currently disables app updates when `HERDR_BROWSER_FORK` is compiled in.
-- Original upstream `src/update.rs` already currently polls approximately hourly (upstream baseline; the planned fork app check is weekly), verifies SHA-256, stages a `.tar.gz`, and provides restart/swap recovery. It currently reads `https://releases.herdr.dev/app/latest.json`.
+- Original upstream `src/update.rs` currently polls approximately hourly (upstream baseline; the planned fork app check is weekly), verifies SHA-256, stages a `.tar.gz`, and provides restart/swap recovery. It currently reads `https://releases.herdr.dev/app/latest.json`.
 - The existing `tests/shot_pixels.rs` checks GPUI pixels, **not actual WKWebView navigation**.
 
 ## Architecture
@@ -29,7 +29,7 @@
 Upstream stable vX.Y.Z tag
           |
           v
-Fork default-branch GitHub Action (schedule every ~6h; manual dispatch too)
+Fork default-branch GitHub Action (once weekly; manual dispatch too)
           |
           v
 Select exact stable upstream tag + immutable SHA; skip if already integrated
@@ -60,12 +60,20 @@ Notify Restart to Update => safe replace / recovery if failed
 
 ## Workstream A — Automatically follow upstream
 
-- [ ] Add `.github/workflows/upstream-sync.yml` to **default branch** (`master` currently): `schedule: '17 */6 * * *'` and `workflow_dispatch`. A schedule on feature branch alone will never execute automatically. GitHub scheduled workflows are best-effort and public repository schedules may be disabled for inactivity.
+- [ ] Add `.github/workflows/upstream-sync.yml` to **default branch** (`master` currently): `schedule: '23 3 * * 1'` (every Monday 03:23 UTC / 11:23 Taiwan time) and `workflow_dispatch` for manual checks. A schedule on a feature branch alone will never execute automatically. GitHub scheduled workflows run independently of the user's Mac, are best-effort (can be delayed/dropped), and public-repo schedules may be disabled for inactivity. Each run must compare the latest stable upstream Git tag/SHA against the last integrated tag, so a missed or delayed weekly run catches up on its next actual execution (or manual dispatch).
 - [ ] Fetch `herdrdev/herdr-app` **Git tags** rather than GitHub Releases (upstream GitHub Release listing can be empty). Parse semver to identify newest stable; ignore pre-releases unless explicitly enabled.
 - [ ] Persist last adopted upstream tag + exact commit SHA, track custom revision separately, enforce idempotency.
 - [ ] Update a dedicated integration branch from the tagged source, preserving the browser patch set, original SVG + `.icns`, vendored crates, third-party notices and CI. Produce a PR with meaningful upstream diff. On conflicts, leave PR blocked and never force push away custom changes.
 - [ ] Check pinned GPUI, gpui-wry and lb-wry compatibility against **the upstream's new GPUI version**. Only update dependencies when tests pass, and commit Cargo.lock.
 - [ ] Auto-publish only after full CI gate passes; do not blindly publish on upstream tag detection.
+
+### Weekly upstream watch policy (user decision)
+
+- [ ] **Upstream GitHub Actions cadence: once weekly** using the default-branch cron above. Do not poll every 6 hours.
+- [ ] **Manual override:** `workflow_dispatch` can trigger a check immediately when an urgent upstream version needs integrating.
+- [ ] **Catch-up:** each invocation compares the current newest eligible stable Git tag and immutable commit SHA to the last successfully integrated upstream tag, so skipped/delayed schedules do not permanently miss an upstream update; never create duplicate integration PRs/issues for the same tag/SHA.
+- [ ] **Failure isolation:** if the upgrade cannot be merged, compiled, or passes no real WebView UI test, keep the last published version unchanged and open/update a deduplicated AI-actionable Issue with the failing logs.
+- [ ] **Caveat:** GitHub scheduled workflows are best-effort and may not run exactly every seven days. This weekly server-side schedule is separate from the local App's rolling seven-day catch-up-on-launch update checks.
 
 ## Workstream B — Build and distribution
 
@@ -148,7 +156,7 @@ In #8 the Rust cache archive was **~2.26 GB compressed**. Restore + save account
 
 ## Test and acceptance matrix (mandatory)
 
-- [ ] Upstream monitor ignores duplicate, older, moving/unverified and prerelease tags; picks exact stable commit; creates one integration PR.
+- [ ] Weekly upstream monitor ignores duplicate, older, moving/unverified and prerelease tags; picks exact stable commit; creates one integration PR. A skipped week is caught up by the next scheduled run or manual dispatch.
 - [ ] New upstream changes preserve Browser tab, address UI, navigation and original icon; conflicts and dependency breaks block release with a visible log.
 - [ ] Rust unit tests cover valid/invalid URLs, version comparisons (especially numeric webview revisions), manifest format, invalid/foreign URLs and integrity failures.
 - [ ] **Real macOS WebView E2E** creates a Browser tab, serves a deterministic local fixture, loads real HTML inside the tab, navigates to a second page, tests back/forward/reload, tab switching and clean close; generic GPU screenshot tests alone are insufficient.
@@ -176,7 +184,7 @@ In #8 the Rust cache archive was **~2.26 GB compressed**. Restore + save account
 
 - [ ] Automatic release after green CI, but conflicts always require manual review: **recommended**.
 - [ ] Original official Herdr and fork can coexist on the same macOS machine? If yes, use an independent Bundle ID and app name (icon remains unchanged).
-- [ ] Poll intervals: upstream Git tags every ~6 hours (GitHub Actions); **local WebView App update feed once per 7 days, catching up at the next launch after a missed due date**, not hourly.
+- [ ] Poll intervals: upstream Git tags **once per week** (GitHub Actions, Mondays 03:23 UTC; `workflow_dispatch` for on-demand checks); **local WebView App update feed once per 7 days, catching up at the next launch after a missed due date**, not hourly.
 
 ## Tracking
 
