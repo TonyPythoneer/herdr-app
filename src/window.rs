@@ -5109,13 +5109,14 @@ impl AppWindow {
                 Err(format!("WK_EVALUATION_FAILED: {error}")), cx);
         }
         cx.spawn(async move |this, cx| {
+            let cancel_for_callback = cancel.clone();
             let result = cx.background_executor().spawn(async move {
-                if cancel.load(std::sync::atomic::Ordering::Acquire) {
+                if cancel_for_callback.load(std::sync::atomic::Ordering::Acquire) {
                     return Err("CANCELLED".into());
                 }
                 let payload = rx.recv_timeout(std::time::Duration::from_secs(15))
                     .map_err(|e| format!("WK_CALLBACK_TIMEOUT: {e}"))?;
-                if cancel.load(std::sync::atomic::Ordering::Acquire) {
+                if cancel_for_callback.load(std::sync::atomic::Ordering::Acquire) {
                     return Err("CANCELLED".into());
                 }
                 crate::wk_agent::parse_callback(&payload)
