@@ -38,8 +38,12 @@ mod mac {
 <body style="margin:0;background:white">
 <button id="trusted" style="position:absolute;left:20px;top:20px;width:120px;height:60px">Tap</button>
 <div id="status" style="position:absolute;top:120px">pending</div>
+<input id="field" aria-label="Field" style="position:absolute;top:175px;left:20px;width:120px;height:35px">
 <script>
-window.__pressed=false;window.__trusted=false;
+window.__pressed=false;window.__trusted=false;window.__keyTrusted=false;
+document.getElementById('field').addEventListener('keydown',(e)=>{
+ if(e.key==='Tab')window.__keyTrusted=e.isTrusted;
+});
 document.getElementById('trusted').addEventListener('click',(e)=>{
  window.__pressed=true;window.__trusted=e.isTrusted;
  document.getElementById('status').textContent=e.isTrusted?'trusted':'synthetic';
@@ -88,7 +92,21 @@ document.getElementById('trusted').addEventListener('click',(e)=>{
             last=evaluate(&web,"window.__pressed===true && window.__trusted===true",cx).await.unwrap_or_default();
             if last=="true" {
                 println!("WKWebView received trusted native AppKit click: {last}");
-                return Ok(());
+                cx.update(|cx|web.update(cx,|v,_|wk_input::click_at(v,80.0,190.0)))
+                    .map_err(|e|format!("could not focus test input: {e}"))?;
+                cx.background_executor().timer(Duration::from_millis(150)).await;
+                cx.update(|cx|web.update(cx,|v,_|wk_input::press_key(v,"Tab")))
+                    .map_err(|e|format!("could not dispatch native Tab: {e}"))?;
+                let mut observed=String::new();
+                for _ in 0..25 {
+                    observed=evaluate(&web,"window.__keyTrusted===true",cx).await.unwrap_or_default();
+                    if observed=="true" {
+                        eprintln!("WK_TRUSTED_KEY_VERIFIED: AppKit keyDown had isTrusted=true");
+                        return Ok(());
+                    }
+                    cx.background_executor().timer(Duration::from_millis(100)).await;
+                }
+                return Err(format!("WebKit did not receive trusted native Tab key: {observed}"));
             }
             cx.background_executor().timer(Duration::from_millis(100)).await;
         }

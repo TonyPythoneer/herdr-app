@@ -132,6 +132,7 @@ jobs:
           set -euo pipefail
           cargo test --locked --config 'profile.dev.package."*".opt-level=0' --test wk_native_input 2>&1 | tee "$RUNNER_TEMP/wk-trusted-input.log"
           grep -Fq 'WK_TRUSTED_INPUT_VERIFIED: native click had isTrusted=true' "$RUNNER_TEMP/wk-trusted-input.log"
+          grep -Fq 'WK_TRUSTED_KEY_VERIFIED: AppKit keyDown had isTrusted=true' "$RUNNER_TEMP/wk-trusted-input.log"
       - name: Build macOS app through upstream packaging
         env:
           HERDR_BROWSER_FORK: "1"
