@@ -99,7 +99,9 @@ pub struct Client {
     writer: Mutex<File>,
     next_id: AtomicU64,
     pending: Mutex<HashMap<u64, Sender<Result<Value, String>>>>,
-    frames: Mutex<HashMap<String, SyncSender<Vec<u8>>>>,
+    // Keep the CDP reader free of PNG decoding; its job is dispatching
+    // responses promptly, including navigation and security-sensitive inputs.
+    frames: Mutex<HashMap<String, SyncSender<String>>>,
 }
 
 impl Client {
@@ -221,9 +223,9 @@ impl Client {
         if data.len() > MAX_FRAME_BASE64 { return }
         let sender = self.frames.lock().unwrap().get(session).cloned();
         if let Some(sender) = sender {
-            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) {
-                let _ = sender.try_send(bytes); // newest frame replaces only after consumer drains
-            }
+            // Decoding a high-frequency PNG here delays unrelated CDP replies.
+            // Only enqueue bounded encoded data; the frame consumer decodes it.
+            let _ = sender.try_send(data.to_owned());
         }
     }
 
@@ -305,7 +307,7 @@ pub struct Session {
     client: Arc<Client>,
     pub target: String,
     pub session: String,
-    frames: Mutex<Receiver<Vec<u8>>>,
+    frames: Mutex<Receiver<String>>,
 }
 
 impl Session {
@@ -357,7 +359,10 @@ impl Session {
     }
 
     pub fn frame_timeout(&self, timeout: Duration) -> Result<Vec<u8>, String> {
-        self.frames.lock().unwrap().recv_timeout(timeout).map_err(|e| format!("Chrome screencast frame unavailable: {e}"))
+        let encoded = self.frames.lock().unwrap().recv_timeout(timeout)
+            .map_err(|e| format!("Chrome screencast frame unavailable: {e}"))?;
+        base64::engine::general_purpose::STANDARD.decode(encoded)
+            .map_err(|e| format!("invalid Chrome screencast frame: {e}"))
     }
 
     pub fn click_at(&self, x: f64, y: f64) -> Result<(), String> {
