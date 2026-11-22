@@ -5,6 +5,7 @@
 import AppKit
 import ApplicationServices
 import CoreGraphics
+import CoreFoundation
 import Foundation
 
 guard CommandLine.arguments.count == 3,
@@ -17,7 +18,7 @@ let pid = pid_t(rawPID)
 let requested = CommandLine.arguments[2] == "approve" ? "Approve once" : "Deny"
 
 func asCFString(_ value: String) -> CFString {
-    value.withCString { CFStringCreateWithCString(nil, $0, kCFStringEncodingUTF8)! }
+    value.withCString { CFStringCreateWithCString(nil, $0, CFStringBuiltInEncodings.UTF8.rawValue)! }
 }
 
 func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
