@@ -156,6 +156,27 @@ matches[0].focus();
             let key=serde_json::to_string(key).map_err(|e|e.to_string())?;
             format!("{focus}return {{ok:true,result:{{key:{key},native:true}}}};")
         }
+        "browser.scroll" => {
+            // Numbers, not page-controlled expressions. Use the real viewport
+            // center when coordinates are omitted; native AppKit validates
+            // the final location against the attached WK child bounds.
+            let pixel = |key:&str, default:f64| -> Result<f64,String> {
+                let value=args.get(key).map(Value::as_f64).unwrap_or(Some(default))
+                    .ok_or_else(||format!("INVALID_ARGUMENT: {key} requires a number"))?;
+                if !value.is_finite()||value.abs()>8192.0 {
+                    return Err(format!("INVALID_ARGUMENT: {key} is out of range"));
+                }
+                Ok(value)
+            };
+            let dx=pixel("delta_x",0.0)?;
+            let dy=pixel("delta_y",0.0)?;
+            if dx.abs()>4096.0||dy.abs()>4096.0||(dx.round()==0.0&&dy.round()==0.0) {
+                return Err("INVALID_ARGUMENT: WK scroll requires a bounded nonzero delta".into());
+            }
+            let x=if args.get("x").is_some(){pixel("x",0.0)?.to_string()}else{"innerWidth/2".into()};
+            let y=if args.get("y").is_some(){pixel("y",0.0)?.to_string()}else{"innerHeight/2".into()};
+            format!("return {{ok:true,result:{{x:{x},y:{y},delta_x:{dx},delta_y:{dy},native:true}}}};")
+        }
         "browser.wait" => {
             let condition=args.get("condition").and_then(Value::as_object)
                 .ok_or("INVALID_ARGUMENT: wait condition must be an object")?;
@@ -257,6 +278,21 @@ mod tests {
         assert!(script("browser.query", &json!({"target":{"css":"button","text":"Search"}}),false).is_err());
         assert!(script("browser.query", &json!({"target":{"css":"button","x":12}}),false).is_err());
         assert!(script("browser.click", &json!({"target":{"css":"button"}}),true).unwrap().contains("native:true"));
+    }
+    #[test]
+    fn wk_native_scroll_uses_bounded_pixel_deltas_and_viewport_coordinates(){
+        let script=script("browser.scroll",&json!({"delta_y":200.0}),false).unwrap();
+        assert!(script.contains("innerWidth/2"));
+        assert!(script.contains("innerHeight/2"));
+        assert!(script.contains("delta_y:200"));
+        assert!(script.contains("native:true"));
+        for args in [
+            json!({}),json!({"delta_y":0}),json!({"delta_y":9000}),
+            json!({"delta_y":true}),json!({"delta_y":200,"x":-50_000}),
+            json!({"delta_y":200,"y":"document.cookie"})
+        ] {
+            assert!(script("browser.scroll",&args,false).is_err(),"unsafe WK scroll {args}");
+        }
     }
     #[test]
     fn wk_wait_supports_typed_conditions_without_injecting_js_literals() {
