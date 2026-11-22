@@ -15,7 +15,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         mpsc::{self, Receiver, Sender, SyncSender},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 const MAX_MESSAGE: usize = 32 * 1024 * 1024;
@@ -268,9 +268,44 @@ impl Client {
         pane.command("Page.enable", json!({}))?;
         pane.command("Runtime.enable", json!({}))?;
         pane.resize(1024, 768)?;
-        // Only start screencasting after the destination target is attached.
-        // No Page.navigate is issued with an already-running frame producer
-        // during startup. User-initiated navigation still uses Page.navigate.
+        // Chrome may create an attached target while its initial navigation is
+        // still pending. Starting Page.startScreencast before the renderer has
+        // an interactive document causes a persistent blank pane in the real
+        // packaged App, even though the isolated CDP fixture can pass.
+        // Explicitly establish a navigated document *before* frame capture.
+        let started = Instant::now();
+        let mut retried_navigation = false;
+        let mut saw_blank = true;
+        let mut last_state = "unknown".to_owned();
+        let mut ready = false;
+        while started.elapsed() < Duration::from_secs(20) {
+            if let Ok(state) = pane.eval("({href:location.href,ready:document.readyState})") {
+                let href = state["href"].as_str().unwrap_or("");
+                let phase = state["ready"].as_str().unwrap_or("unknown");
+                saw_blank = href.is_empty() || href == "about:blank";
+                last_state = phase.to_owned();
+                if !saw_blank && matches!(phase, "interactive" | "complete") {
+                    ready = true;
+                    break;
+                }
+            }
+            // Target.createTarget(url) should initiate navigation, but some
+            // packaged Chrome launches remain on about:blank. Retry once via
+            // Page.navigate *before* screencast starts, not while PNG events
+            // are filling the debugging pipe.
+            if saw_blank && !retried_navigation
+                && started.elapsed() > Duration::from_secs(2)
+            {
+                retried_navigation = true;
+                pane.navigate(&url)?;
+            }
+            std::thread::sleep(Duration::from_millis(150));
+        }
+        if !ready {
+            return Err(format!(
+                "CHROME_DOCUMENT_NOT_READY: initial target never became interactive (phase={last_state}, blank={saw_blank}, retry={retried_navigation})"
+            ));
+        }
         pane.command("Page.startScreencast", json!({"format":"png","everyNthFrame":1}))?;
         Ok(pane)
     }
