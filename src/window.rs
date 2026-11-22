@@ -405,7 +405,8 @@ struct BrowserJob {
     pane: String,
     action: String,
     args: Value,
-    session: Arc<crate::chrome_cdp::Session>,
+    /// None: native WKWebView callback backend. Some: Chrome CDP backend.
+    session: Option<Arc<crate::chrome_cdp::Session>>,
     cancelled: Arc<std::sync::atomic::AtomicBool>,
     status: BrowserJobStatus,
 }
@@ -4928,8 +4929,6 @@ impl AppWindow {
         let Some(pane) = self.browser_pane(Some(pane_id)) else {
             return self.fail("PANE_NOT_FOUND: browser pane does not exist");
         };
-        // A job waiting for human approval holds the lane: a later mutation
-        // cannot overtake it and accidentally act on an altered page.
         if self.browser_jobs.values().any(|job|
             job.pane == pane && !matches!(job.status, BrowserJobStatus::Finished(_))
         ) {
@@ -4938,12 +4937,17 @@ impl AppWindow {
         if self.browser_jobs.len() >= 64 {
             return self.fail("TOO_MANY_REQUESTS: collect browser.result for completed operations");
         }
-        let Some(view) = self.chrome_views.get(&pane) else {
-            return self.fail("UNSUPPORTED_ENGINE: Agent automation currently requires Chrome CDP");
+        let session = if let Some(chrome) = self.chrome_views.get(&pane) {
+            let Some(session) = chrome.read(cx).session() else {
+                return self.fail("BROWSER_NOT_READY: Chrome is still starting; retry after a moment");
+            };
+            Some(session)
+        } else if self.browser_views.contains_key(&pane) {
+            None
+        } else {
+            return self.fail("BROWSER_NOT_READY: the browser pane has no active backend");
         };
-        let Some(session) = view.read(cx).session() else {
-            return self.fail("BROWSER_NOT_READY: Chrome is still starting; retry after a moment");
-        };
+        let engine = if session.is_some() { "chrome-cdp" } else { "wkwebview" };
         let request_id = match new_browser_request_id() {
             Ok(id) => id,
             Err(error) => return self.fail(error),
@@ -4958,42 +4962,78 @@ impl AppWindow {
         });
         self.browser_dispatch_job(request_id.clone(), false, cx);
         self.answer(Ok(json!({
-            "api_version": crate::browser_backend::API_VERSION,
-            "ok": true,
-            "status": "accepted",
-            "request_id": request_id,
-            "pane": pane,
-            "engine": "chrome-cdp"
+            "api_version":crate::browser_backend::API_VERSION,
+            "ok":true,"status":"accepted","request_id":request_id,
+            "pane":pane,"engine":engine
         })));
+    }
+
+    /// Unified completion: a real WebKit callback or CDP response is required
+    /// before the request can be observed as completed.
+    #[cfg(target_os = "macos")]
+    fn browser_finish_job(&mut self, id: &str, approved: bool,
+        result: Result<Value, String>, cx: &mut Context<Self>)
+    {
+        if let Some(job) = self.browser_jobs.get_mut(id) {
+            if job.cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                job.status = BrowserJobStatus::Finished(Err("CANCELLED".into()));
+            } else if !approved && result.as_ref().err().is_some_and(|e| e.starts_with("APPROVAL_REQUIRED:")) {
+                job.status = BrowserJobStatus::ApprovalRequired(result.unwrap_err());
+            } else {
+                job.status = BrowserJobStatus::Finished(result);
+            }
+            cx.notify();
+        }
     }
 
     #[cfg(target_os = "macos")]
     fn browser_dispatch_job(&mut self, id: String, approved: bool, cx: &mut Context<Self>) {
         let Some(job) = self.browser_jobs.get_mut(&id) else { return };
-        let (action, args, session, cancel) = (
-            job.action.clone(), job.args.clone(), job.session.clone(), job.cancelled.clone()
+        let (action, args, session, cancel, pane) = (
+            job.action.clone(), job.args.clone(), job.session.clone(),
+            job.cancelled.clone(), job.pane.clone()
         );
         job.status = BrowserJobStatus::Running;
+        if let Some(session) = session {
+            cx.spawn(async move |this, cx| {
+                let result = cx.background_executor().spawn(async move {
+                    crate::browser_api::run(&session, &action, &args, approved, &cancel)
+                }).await;
+                let _ = this.update(cx, |this, cx| this.browser_finish_job(&id, approved, result, cx));
+            }).detach();
+            return;
+        }
+
+        let script = match crate::wk_agent::script(&action, &args, approved) {
+            Ok(script) => script,
+            Err(error) => return self.browser_finish_job(&id, approved, Err(error), cx),
+        };
+        let Some(view) = self.browser_views.get(&pane) else {
+            return self.browser_finish_job(&id, approved, Err("BROWSER_NOT_READY: WKWebView pane is hidden or closed".into()), cx);
+        };
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        let launched = view.update(cx, |view, _| {
+            view.raw().evaluate_script_with_callback(&script, move |value| {
+                let _ = tx.send(value);
+            })
+        });
+        if let Err(error) = launched {
+            return self.browser_finish_job(&id, approved,
+                Err(format!("WK_EVALUATION_FAILED: {error}")), cx);
+        }
         cx.spawn(async move |this, cx| {
             let result = cx.background_executor().spawn(async move {
-                crate::browser_api::run(&session, &action, &args, approved, &cancel)
-            }).await;
-            let _ = this.update(cx, |this, cx| {
-                if let Some(job) = this.browser_jobs.get_mut(&id) {
-                    if job.cancelled.load(std::sync::atomic::Ordering::Acquire) {
-                        job.status = BrowserJobStatus::Finished(Err("CANCELLED".into()));
-                    } else if let Err(error) = &result {
-                        if !approved && error.starts_with("APPROVAL_REQUIRED:") {
-                            job.status = BrowserJobStatus::ApprovalRequired(error.clone());
-                        } else {
-                            job.status = BrowserJobStatus::Finished(result);
-                        }
-                    } else {
-                        job.status = BrowserJobStatus::Finished(result);
-                    }
-                    cx.notify();
+                if cancel.load(std::sync::atomic::Ordering::Acquire) {
+                    return Err("CANCELLED".into());
                 }
-            });
+                let payload = rx.recv_timeout(std::time::Duration::from_secs(15))
+                    .map_err(|e| format!("WK_CALLBACK_TIMEOUT: {e}"))?;
+                if cancel.load(std::sync::atomic::Ordering::Acquire) {
+                    return Err("CANCELLED".into());
+                }
+                crate::wk_agent::parse_callback(&payload)
+            }).await;
+            let _ = this.update(cx, |this, cx| this.browser_finish_job(&id, approved, result, cx));
         }).detach();
     }
 
@@ -5006,18 +5046,19 @@ impl AppWindow {
         let Some(job) = self.browser_jobs.get(id) else {
             return self.fail("REQUEST_NOT_FOUND: browser job may have been collected or cancelled");
         };
-        let (status, pane) = (job.status.clone(), job.pane.clone());
+        let (status, pane, engine) = (job.status.clone(), job.pane.clone(),
+            if job.session.is_some() { "chrome-cdp" } else { "wkwebview" });
         match status {
             BrowserJobStatus::Running => self.answer(Ok(json!({
                 "api_version":crate::browser_backend::API_VERSION,
                 "ok":true,
-                "status":"accepted", "request_id":id,"pane":pane, "engine":"chrome-cdp"
+                "status":"accepted", "request_id":id,"pane":pane, "engine":engine
             }))),
             BrowserJobStatus::ApprovalRequired(reason) => self.answer(Ok(json!({
                 "api_version":crate::browser_backend::API_VERSION,
                 "ok":true,
                 "status":"accepted","request_id":id,"pane":pane,
-                "approval_required":true,"detail":reason,"engine":"chrome-cdp"
+                "approval_required":true,"detail":reason,"engine":engine
             }))),
             BrowserJobStatus::Finished(result) => {
                 self.browser_jobs.remove(id);
@@ -5025,12 +5066,12 @@ impl AppWindow {
                     Ok(value) => json!({
                         "api_version":crate::browser_backend::API_VERSION,"ok":true,
                         "status":"completed","request_id":id,"pane":pane,
-                        "engine":"chrome-cdp","result":value
+                        "engine":engine,"result":value
                     }),
                     Err(error) => json!({
                         "api_version":crate::browser_backend::API_VERSION,"ok":false,
                         "status":"failed","request_id":id,"pane":pane,
-                        "engine":"chrome-cdp","error":error
+                        "engine":engine,"error":error
                     }),
                 };
                 self.answer(Ok(response));
@@ -5153,7 +5194,7 @@ impl AppWindow {
         for id in stale_chrome { self.chrome_views.remove(&id); }
         self.browser_jobs.retain(|_, job| {
             let keep = owned.get(&job.pane).is_some_and(|value|
-                matches!(value, Ok((BrowserEngine::ChromeCdp, _))));
+                matches!(value, Ok((BrowserEngine::ChromeCdp | BrowserEngine::WkWebView, _))));
             if !keep {
                 job.cancelled.store(true, std::sync::atomic::Ordering::Release);
             }
