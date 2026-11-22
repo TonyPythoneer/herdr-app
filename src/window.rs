@@ -5109,18 +5109,36 @@ impl AppWindow {
                 Err(format!("WK_EVALUATION_FAILED: {error}")), cx);
         }
         cx.spawn(async move |this, cx| {
+            let cancel_for_callback = cancel.clone();
             let result = cx.background_executor().spawn(async move {
-                if cancel.load(std::sync::atomic::Ordering::Acquire) {
+                if cancel_for_callback.load(std::sync::atomic::Ordering::Acquire) {
                     return Err("CANCELLED".into());
                 }
                 let payload = rx.recv_timeout(std::time::Duration::from_secs(15))
                     .map_err(|e| format!("WK_CALLBACK_TIMEOUT: {e}"))?;
-                if cancel.load(std::sync::atomic::Ordering::Acquire) {
+                if cancel_for_callback.load(std::sync::atomic::Ordering::Acquire) {
                     return Err("CANCELLED".into());
                 }
                 crate::wk_agent::parse_callback(&payload)
             }).await;
-            let _ = this.update(cx, |this, cx| this.browser_finish_job(&id, approved, result, cx));
+            let _ = this.update(cx, |this, cx| {
+                let result: Result<Value, String> =
+                    if matches!(action.as_str(), "browser.click" | "browser.click_at") {
+                        result.and_then(|coordinates| {
+                            let x=coordinates["x"].as_f64().ok_or("INVALID_ARGUMENT: missing native click X")?;
+                            let y=coordinates["y"].as_f64().ok_or("INVALID_ARGUMENT: missing native click Y")?;
+                            if cancel.load(std::sync::atomic::Ordering::Acquire) {
+                                return Err("CANCELLED".into());
+                            }
+                            let view=this.browser_views.get(&pane)
+                                .ok_or("BROWSER_NOT_READY: WKWebView was closed before click")?;
+                            view.update(cx, |view, _| crate::wk_input::click_at(view, x, y))?;
+                            Ok(json!({"native_event_dispatched":true,"postcondition_verified":false,
+                                "message":"Re-observe the page to verify the intended effect"}))
+                        })
+                    } else { result };
+                this.browser_finish_job(&id, approved, result, cx);
+            });
         }).detach();
     }
 

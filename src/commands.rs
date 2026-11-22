@@ -54,7 +54,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("browser.snapshot", &[req("pane"), opt("mode"), opt("max_nodes")], "Read a bounded semantic DOM snapshot in a Chrome pane."),
     cmd("browser.query", &[req("pane"), req("target"), opt("timeout_ms")], "Find bounded elements by CSS, role/name, label, text, test_id or snapshot ref."),
     cmd("browser.inspect", &[req("pane"), req("target"), opt("include_attributes")], "Inspect an element without exposing password values."),
-    cmd("browser.click", &[req("pane"), req("target"), opt("timeout_ms"), opt("wait_until")], "Click an element using native CDP input; risky or uncertain actions require native approval."),
+    cmd("browser.click", &[req("pane"), req("target"), opt("timeout_ms"), opt("wait_until")], "Click an element using the selected native browser backend; risky or uncertain actions require native approval."),
     cmd("browser.click_at", &[req("pane"), req("x"), req("y"), opt("snapshot_id")], "Click viewport coordinates, requiring native approval."),
     cmd("browser.fill", &[req("pane"), req("target"), req("value"), opt("timeout_ms")], "Focus, select and enter text; sensitive fields require native approval."),
     cmd("browser.type", &[req("pane"), req("target"), req("text"), opt("timeout_ms")], "Focus and type without clearing an editable field."),

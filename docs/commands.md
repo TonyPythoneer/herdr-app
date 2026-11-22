@@ -219,7 +219,7 @@ Inspect an element without exposing password values.
 
 ## `browser.click`
 
-Click an element using native CDP input; risky or uncertain actions require native approval.
+Click an element using the selected native browser backend; risky or uncertain actions require native approval.
 
 | Argument | Required |
 |---|---|
