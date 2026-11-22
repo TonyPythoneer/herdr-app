@@ -118,6 +118,10 @@ jobs:
         env:
           HERDR_SHOT_NATIVE_TEST: "1"
         run: cargo test --locked --config 'profile.dev.package."*".opt-level=0' --test shot_pixels
+      - name: Real GPUI/WKWebView child snapshot pixels (native AppKit)
+        env:
+          HERDR_WK_NATIVE_SMOKE: "1"
+        run: cargo test --locked --config 'profile.dev.package."*".opt-level=0' --test wk_native_pixels
       - name: Build macOS app through upstream packaging
         env:
           HERDR_BROWSER_FORK: "1"
