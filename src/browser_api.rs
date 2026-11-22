@@ -1,4 +1,7 @@
-//! Bounded, pane-scoped Chrome automation routines. Called only from the
+//! Shared browser page policy (DOM helpers, locators, wait semantics and the
+//! native-approval gates) plus the bounded Chrome CDP routines that execute it.
+//! WKWebView's wk_agent scripts embed the same helpers, so both engines judge
+//! risk, sensitivity and liveness by one set of rules. Called only from the
 //! host's verified Herdr-pane dispatcher, never from a web page script.
 use crate::chrome_cdp::Session;
 use serde_json::{Value, json};
@@ -17,9 +20,15 @@ fn coordinate(args: &Value, key: &str, default: f64) -> Result<f64, String> {
     if !n.is_finite() || n.abs()>100000.0 {return Err(format!("INVALID_ARGUMENT: invalid {key}"))}
     Ok(n)
 }
-fn locator(args: &Value) -> Result<&Value,String> {
+/// One locator schema for both engines and every command: exactly one of
+/// css/role/label/text/test_id/ref, plus optional name/exact/snapshot_id.
+/// `css_only` is for native text/key targets that focus a single element.
+pub(crate) fn locator<'a>(args: &'a Value, css_only: bool) -> Result<&'a Value,String> {
     let v=args.get("target").ok_or("INVALID_ARGUMENT: target required")?;
     let obj=v.as_object().ok_or("INVALID_ARGUMENT: target must be an object")?;
+    if css_only && (obj.len()!=1 || !obj.contains_key("css")) {
+        return Err("INVALID_ARGUMENT: native text/key target supports one CSS selector".into());
+    }
     let types=["css","role","label","text","test_id","ref"];
     if types.iter().filter(|key|obj.contains_key(**key)).count()!=1 ||
         obj.keys().any(|k|!types.contains(&k.as_str()) && !["name","exact","snapshot_id"].contains(&k.as_str())) {
@@ -27,11 +36,62 @@ fn locator(args: &Value) -> Result<&Value,String> {
     }
     for (key,val) in obj {
         if key=="exact" {if !val.is_boolean(){return Err("INVALID_ARGUMENT: target.exact must be boolean".into())}}
-        else if !val.is_string() || val.as_str().is_some_and(|s|s.len()>512){
-            return Err(format!("INVALID_ARGUMENT: target.{key} must be a string of at most 512 bytes"));
+        else if !val.is_string() || val.as_str().is_some_and(|s|s.is_empty()||s.len()>512){
+            return Err(format!("INVALID_ARGUMENT: target.{key} must be a non-empty string of at most 512 bytes"));
         }
     }
     Ok(v)
+}
+
+/// Keys that can submit a form or activate a focused control under either
+/// engine's naming (Return aliases Enter, Space activates buttons). Every
+/// engine gates these on native approval through this one list.
+pub(crate) fn activating_key(key: &str) -> bool {
+    matches!(key, "Enter" | "Return" | "Space")
+}
+
+/// Shared `browser.wait` condition contract for both engines: same keys, same
+/// bounds, same timeout, so one engine cannot accept what the other rejects.
+pub(crate) fn wait_condition(args: &Value) -> Result<Value, String> {
+    let condition=args.get("condition").and_then(Value::as_object)
+        .ok_or("INVALID_ARGUMENT: wait condition must be an object")?;
+    if condition.is_empty() || condition.len()>4
+        || condition.keys().any(|key| !["url","selector","state","text"].contains(&key.as_str())) {
+        return Err("INVALID_ARGUMENT: unsupported or empty wait condition".into());
+    }
+    for (key, value) in condition {
+        let text=value.as_str().ok_or("INVALID_ARGUMENT: wait fields must be strings")?;
+        let limit=if key=="url"{2048}else{512};
+        if text.is_empty()||text.len()>limit {
+            return Err(format!("INVALID_ARGUMENT: wait condition.{key} is too long or empty"));
+        }
+    }
+    if condition.contains_key("state") &&
+        (!condition.contains_key("selector") ||
+         !["visible","hidden"].contains(&condition["state"].as_str().unwrap_or("")))
+    {
+        return Err("INVALID_ARGUMENT: state requires selector and visible|hidden".into());
+    }
+    if !condition.contains_key("url") && !condition.contains_key("selector") && !condition.contains_key("text") {
+        return Err("INVALID_ARGUMENT: wait needs a URL, selector or text condition".into());
+    }
+    if args.get("timeout_ms").is_some_and(|v| v.as_u64().is_none_or(|t| t==0 || t>30000)) {
+        return Err("INVALID_ARGUMENT: timeout_ms must be 1..30000".into());
+    }
+    Ok(Value::Object(condition.clone()))
+}
+
+/// Shared wait probe: both engines must agree on what visible/hidden means.
+/// Leaves `matched` and `url` for the caller's result envelope.
+pub(crate) fn wait_probe(cond: &Value) -> String {
+    format!(r#"const c={cond};let matched=true;
+if(c.url!==undefined)matched=matched&&location.href.includes(c.url);
+if(c.selector!==undefined){{
+ const el=document.querySelector(c.selector);
+ const shown=!!el&&visible(el);
+ matched=matched&&(c.state==='hidden'?!shown:shown);
+}}
+if(c.text!==undefined)matched=matched&&!!document.body&&document.body.innerText.includes(c.text);"#,cond=cond)
 }
 
 pub(crate) const DOM_HELPERS: &str = r#"
@@ -59,6 +119,27 @@ const sensitive=e=>{
   return kind==='password'||kind==='hidden'
     ||/(?:^|\s)(?:current-password|new-password|one-time-code|cc-[\w-]+)(?:\s|$)/i.test(autocomplete)
     ||/(?:password|passwd|passcode|pin|otp|totp|2fa|cvv|cvc|credit.?card|card.?number|secret|access.?token|api.?key|security.?code)/i.test(identity);
+};
+const editable=e=>{
+  if(!visible(e)||e.disabled||e.readOnly)return {error:'ELEMENT_NOT_ACTIONABLE'};
+  if(!['INPUT','TEXTAREA'].includes(e.tagName)&&!e.isContentEditable)return {error:'NOT_EDITABLE'};
+  return null;
+};
+// A harmless-looking label does not make a submit button or a destructive
+// destination safe. This is a conservative preflight shared by both engines;
+// native approval is still required before clicking unknown controls.
+const riskOf=e=>{
+  const label=name(e).toLowerCase();
+  const form=e.closest('form');
+  const submits=(e.tagName==='BUTTON'||e.tagName==='INPUT')&&e.type==='submit'
+    &&(!form||form.getAttribute('role')!=='search');
+  const href=e.tagName==='A'?e.getAttribute('href')||'':'';
+  const riskyHref=/(?:^|[/?#&=_-])(pay|purchase|checkout|delete|remove|transfer|confirm|order|submit|unsubscribe|logout)(?:[/?#&=_-]|$)/i.test(href);
+  const dangerous=/pay|buy|purchase|checkout|send|delete|remove|transfer|publish|confirm|order|submit|unsubscribe|account|save|security/i.test(label)
+    ||submits||riskyHref;
+  const known=(e.tagName==='A'&&/^https?:/.test(e.href))||
+   /^(search|next|back|previous|open|close|show|hide|expand|collapse|filter|play|pause)$/i.test(label);
+  return {label:label.slice(0,120),dangerous,unknown:!known};
 };
 const summary=e=>{
   const b=e.getBoundingClientRect();
@@ -140,32 +221,20 @@ title:document.title,url:location.href,elements:items,truncated:nodes.length>ite
             session.eval(&expression)?
         }
         "browser.query"|"browser.inspect"=>{
-            let loc=locator(args)?;
+            let loc=locator(args,false)?;
             let limit=if command=="browser.inspect"{1}else{50};
             session.eval(&js(loc,&format!("const els=select();return {{count:els.length,truncated:els.length>{limit},elements:els.slice(0,{limit}).map(summary)}};")))?
         }
         "browser.click"=>{
-            let loc=locator(args)?;
+            let loc=locator(args,false)?;
             let info=unique(session,loc,r#"
 if(!visible(el)||el.disabled||el.getAttribute('aria-disabled')==='true')return {error:'ELEMENT_NOT_ACTIONABLE'};
 el.scrollIntoView({block:'center',inline:'center',behavior:'instant'});
 const b=el.getBoundingClientRect(),x=b.x+b.width/2,y=b.y+b.height/2;
 const top=document.elementFromPoint(x,y);
 if(!top||(top!==el&&!el.contains(top)))return {error:'ELEMENT_OBSCURED'};
-const label=name(el).toLowerCase();
-// A harmless-looking label does not make a submit button or a destructive
-// destination safe. This is a conservative preflight; native approval is
-// still required before clicking unknown controls.
-const form=el.closest('form');
-const submits=(el.tagName==='BUTTON'||el.tagName==='INPUT')&&el.type==='submit'
-  &&(!form||form.getAttribute('role')!=='search');
-const href=el.tagName==='A'?el.getAttribute('href')||'':'';
-const riskyHref=/(?:^|[/?#&=_-])(pay|purchase|checkout|delete|remove|transfer|confirm|order|submit|unsubscribe|logout)(?:[/?#&=_-]|$)/i.test(href);
-const dangerous=/pay|buy|purchase|checkout|send|delete|remove|transfer|publish|confirm|order|submit|unsubscribe|account/i.test(label)
-  ||submits||riskyHref;
-const known=(el.tagName==='A'&&/^https?:/.test(el.href))||
- /^(search|next|back|previous|open|close|show|hide|expand|collapse|filter|play|pause)$/i.test(label);
-return {x,y,dangerous,unknown:!known,label:label.slice(0,120)};"#)?;
+const risk=riskOf(el);
+return {x,y,dangerous:risk.dangerous,unknown:risk.unknown,label:risk.label};"#)?;
             if !approved&&(info["dangerous"]==true||info["unknown"]==true){
                 return Err(format!("APPROVAL_REQUIRED: click on site control {:?}",info["label"]));
             }
@@ -183,20 +252,18 @@ return {x,y,dangerous,unknown:!known,label:label.slice(0,120)};"#)?;
             json!({"clicked":true})
         }
         "browser.fill"|"browser.type"=>{
-            let loc=locator(args)?;
+            let loc=locator(args,false)?;
             let value=required(args,if command=="browser.fill"{"value"}else{"text"})?;
             // The DOM bridge only locates/focuses/selects; actual typing is
             // dispatched through Chrome Input.insertText, not el.value=...
             let expression=if command=="browser.fill" {r#"
-if(!visible(el)||el.disabled||el.readOnly)return {error:'ELEMENT_NOT_ACTIONABLE'};
-if(!['INPUT','TEXTAREA'].includes(el.tagName)&&!el.isContentEditable)return {error:'NOT_EDITABLE'};
+const gate=editable(el);if(gate)return gate;
 el.focus();
 if(typeof el.select==='function')el.select();
 else if(el.isContentEditable)document.getSelection().selectAllChildren(el);
 return {ready:true,sensitive:sensitive(el)};
 "#}else{r#"
-if(!visible(el)||el.disabled||el.readOnly)return {error:'ELEMENT_NOT_ACTIONABLE'};
-if(!['INPUT','TEXTAREA'].includes(el.tagName)&&!el.isContentEditable)return {error:'NOT_EDITABLE'};
+const gate=editable(el);if(gate)return gate;
 el.focus();return {ready:true,sensitive:sensitive(el)};"#};
             let info=unique(session,loc,expression)?;
             if info["sensitive"]==true && !approved {return Err("APPROVAL_REQUIRED: entering sensitive credentials/payment data".into())}
@@ -206,9 +273,7 @@ el.focus();return {ready:true,sensitive:sensitive(el)};"#};
         }
         "browser.press"=>{
             let key=required(args,"key")?;
-            // Return aliases Enter, and Space can activate a focused button. Neither
-            // may bypass the native human-approval gate through a different key name.
-            if matches!(key, "Enter" | "Return" | "Space") && !approved {
+            if activating_key(key) && !approved {
                 return Err("APPROVAL_REQUIRED: native key could submit or activate a site action".into());
             }
             if let Some(loc)=args.get("target"){unique(session,loc,"el.focus();return {focused:true};")?;}
@@ -234,14 +299,13 @@ el.focus();return {ready:true,sensitive:sensitive(el)};"#};
             json!({"scrolled":true})
         }
         "browser.wait"=>{
-            let cond=args.get("condition").filter(|v|v.is_object()).ok_or("INVALID_ARGUMENT: condition must be an object")?;
-            let js=format!(r#"(() => {{const c={};let ok=true;
-if(c.url!==undefined)ok=ok&&location.href.includes(c.url);
-if(c.selector!==undefined){{const el=document.querySelector(c.selector);
-const visible=!!el&&el.getBoundingClientRect().width>0&&el.getBoundingClientRect().height>0;
-ok=ok&&(c.state==='hidden'?!visible:visible);}}
-if(c.text!==undefined)ok=ok&&!!document.body&&document.body.innerText.includes(c.text);
-return {{matched:!!ok,url:location.href}};}})()"#,cond);
+            let cond=wait_condition(args)?;
+            let probe=wait_probe(&cond);
+            let js=format!(r#"(() => {{
+const t=null;
+{DOM_HELPERS}
+{probe}
+return {{matched:!!matched,url:location.href}};}})()"#);
             let timeout=Duration::from_millis(args["timeout_ms"].as_u64().unwrap_or(5000).min(30000));
             let start=Instant::now();
             loop {
@@ -286,10 +350,44 @@ mod tests {
     }
     #[test]
     fn locator_must_be_unique_in_schema(){
-        assert!(locator(&json!({"target":{"css":"button"}})).is_ok());
-        assert!(locator(&json!({"target":{"role":"button","name":"Search"}})).is_ok());
-        assert!(locator(&json!({"target":{"css":"button","text":"Search"}})).is_err());
-        assert!(locator(&json!({"target":{"x":1,"y":2}})).is_err());
+        assert!(locator(&json!({"target":{"css":"button"}}),false).is_ok());
+        assert!(locator(&json!({"target":{"role":"button","name":"Search"}}),false).is_ok());
+        assert!(locator(&json!({"target":{"css":"button","text":"Search"}}),false).is_err());
+        assert!(locator(&json!({"target":{"x":1,"y":2}}),false).is_err());
+        assert!(locator(&json!({"target":{"css":""}}),false).is_err());
+        assert!(locator(&json!({"target":{"css":"#f"}}),true).is_ok());
+        assert!(locator(&json!({"target":{"role":"textbox"}}),true).is_err());
+    }
+    #[test]
+    fn one_shared_policy_gates_activating_keys_and_click_risk(){
+        for key in ["Enter","Return","Space"] {
+            assert!(activating_key(key),"{key} must require native approval");
+        }
+        for key in ["Tab","Escape","Backspace","ArrowUp"] {
+            assert!(!activating_key(key));
+        }
+        // The risky-destination and submit rules live exactly once, in the
+        // shared helpers both engines embed; per-engine copies may drift.
+        assert!(DOM_HELPERS.contains("const riskOf="));
+        assert!(DOM_HELPERS.contains("const editable="));
+        assert_eq!(DOM_HELPERS.matches("const riskyHref=").count(),1);
+        assert_eq!(DOM_HELPERS.matches("const sensitive=").count(),1);
+    }
+    #[test]
+    fn wait_conditions_share_one_contract(){
+        assert!(wait_condition(&json!({"condition":{"text":"Done"}})).is_ok());
+        assert!(wait_condition(&json!({"condition":{"selector":"#a","state":"hidden"}})).is_ok());
+        for bad in [json!({"condition":{}}),json!({"condition":{"state":"hidden"}}),
+                    json!({"condition":{"selector":"#a","state":"bogus"}}),
+                    json!({"condition":{"selector":"input","exec":"alert(1)"}}),
+                    json!({"condition":{"text":"t"},"timeout_ms":30001})] {
+            assert!(wait_condition(&bad).is_err(),"unsafe wait condition {bad}");
+        }
+        let probe=wait_probe(&json!({"selector":"#submit","state":"visible"}));
+        assert!(probe.contains("const c="));
+        assert!(probe.contains("\"selector\":\"#submit\""));
+        assert!(probe.contains("\"state\":\"visible\""));
+        assert!(probe.contains("visible(el)"),"both engines must share visible() semantics");
     }
     #[test]
     fn chrome_screenshot_directory_rejects_symlink_redirection(){
