@@ -241,12 +241,13 @@ impl Client {
         pane.command("Page.enable", json!({}))?;
         pane.command("Runtime.enable", json!({}))?;
         pane.resize(1024, 768)?;
-        // Navigate before starting the high-volume PNG screencast. On packaged
-        // macOS builds, frame streaming can starve the CDP pipe reader and
-        // delay Page.navigate's response until the request times out.
-        // The native browser target is still exercised by the E2E gate.
-        pane.navigate(&url)?;
+        // Start capture on the attached about:blank target before navigation:
+        // some Chrome builds detach the initial page session during navigation
+        // and reject a later Page.startScreencast as "Not attached to an active page".
+        // The reader thread does no PNG decoding, so frame traffic cannot
+        // monopolize the CDP reply dispatcher during Page.navigate.
         pane.command("Page.startScreencast", json!({"format":"png","everyNthFrame":1}))?;
+        pane.navigate(&url)?;
         Ok(pane)
     }
 }
