@@ -102,6 +102,10 @@ pub struct Client {
     // Keep the CDP reader free of PNG decoding; its job is dispatching
     // responses promptly, including navigation and security-sensitive inputs.
     frames: Mutex<HashMap<String, SyncSender<String>>>,
+    // Screencast ACK writes must never happen inside the pipe reader:
+    // Chrome can block writing a large PNG while waiting for the next ACK.
+    // Writing an ACK synchronously from its reader creates a pipe deadlock.
+    frame_acks: SyncSender<(String, i64)>,
 }
 
 impl Client {
@@ -149,18 +153,33 @@ impl Client {
         };
         let writer = unsafe { File::from_raw_fd(cmd_write) };
         let reader = unsafe { File::from_raw_fd(out_read) };
+        let (frame_acks, ack_rx) = mpsc::sync_channel::<(String, i64)>(32);
         let client = Arc::new(Self {
             child: Mutex::new(child),
             writer: Mutex::new(writer),
             next_id: AtomicU64::new(1),
             pending: Mutex::new(HashMap::new()),
             frames: Mutex::new(HashMap::new()),
+            frame_acks,
         });
         let weak = Arc::downgrade(&client);
         std::thread::Builder::new()
             .name("herdr-chrome-cdp-read".into())
             .spawn(move || read_messages(reader, weak))
             .map_err(|e| format!("cannot create CDP reader: {e}"))?;
+        let weak = Arc::downgrade(&client);
+        std::thread::Builder::new()
+            .name("herdr-chrome-cdp-ack".into())
+            .spawn(move || {
+                while let Ok((session, frame_id)) = ack_rx.recv() {
+                    let Some(client) = weak.upgrade() else { break };
+                    if client.send("Page.screencastFrameAck",
+                        json!({"sessionId":frame_id}), Some(&session)).is_err() {
+                        break;
+                    }
+                }
+            })
+            .map_err(|e| format!("cannot create CDP ACK writer: {e}"))?;
         client.request("Browser.getVersion", json!({}), None)?;
         Ok(client)
     }
@@ -216,8 +235,10 @@ impl Client {
         let Some(session) = message.get("sessionId").and_then(Value::as_str) else { return };
         let Some(params) = message.get("params") else { return };
         if let Some(frame_id) = params.get("sessionId").and_then(Value::as_i64) {
-            // Always ACK even if the frame is discarded, otherwise rendering stalls.
-            let _ = self.send("Page.screencastFrameAck", json!({"sessionId":frame_id}), Some(session));
+            // Never block the only CDP reader on a write into Chrome's pipe.
+            // Even discarded frames need ACKs to keep the screencast moving.
+            // Chrome throttles frames by ACK; 32 slots bound transient traffic.
+            let _ = self.frame_acks.try_send((session.to_owned(), frame_id));
         }
         let Some(data) = params.get("data").and_then(Value::as_str) else { return };
         if data.len() > MAX_FRAME_BASE64 { return }
