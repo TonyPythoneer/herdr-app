@@ -199,7 +199,7 @@ mod tests {
         assert!(query.contains("els.slice(0,50)"));
         assert!(script("browser.query", &json!({"target":{"css":"button","text":"Search"}}),false).is_err());
         assert!(script("browser.query", &json!({"target":{"css":"button","x":12}}),false).is_err());
-        assert!(script("browser.click", &json!({"target":{"css":"button"}}),true).is_err());
+        assert!(script("browser.click", &json!({"target":{"css":"button"}}),true).unwrap().contains("native:true"));
     }
     #[test]
     fn wk_wait_supports_typed_conditions_without_injecting_js_literals() {
