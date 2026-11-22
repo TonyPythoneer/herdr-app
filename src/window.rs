@@ -5004,6 +5004,32 @@ impl AppWindow {
             return;
         }
 
+        if action == "browser.screenshot" {
+            let Some(view) = self.browser_views.get(&pane) else {
+                return self.browser_finish_job(&id, approved,
+                    Err("BROWSER_NOT_READY: WKWebView is closed".into()), cx);
+            };
+            let (tx, rx) = std::sync::mpsc::channel::<Result<Vec<u8>, String>>();
+            let started = view.update(cx, |view, _| crate::wk_native::start_tiff_snapshot(view, tx));
+            if let Err(error) = started {
+                return self.browser_finish_job(&id, approved, Err(error), cx);
+            }
+            cx.spawn(async move |this, cx| {
+                let result = cx.background_executor().spawn(async move {
+                    if cancel.load(std::sync::atomic::Ordering::Acquire) {
+                        return Err("CANCELLED".into());
+                    }
+                    let tiff = rx.recv_timeout(std::time::Duration::from_secs(30))
+                        .map_err(|e| format!("WK_SNAPSHOT_TIMEOUT: {e}"))??;
+                    if cancel.load(std::sync::atomic::Ordering::Acquire) {
+                        return Err("CANCELLED".into());
+                    }
+                    crate::wk_native::encode_and_save(&tiff, &id)
+                }).await;
+                let _ = this.update(cx, |this, cx| this.browser_finish_job(&id, approved, result, cx));
+            }).detach();
+            return;
+        }
         let script = match crate::wk_agent::script(&action, &args, approved) {
             Ok(script) => script,
             Err(error) => return self.browser_finish_job(&id, approved, Err(error), cx),
