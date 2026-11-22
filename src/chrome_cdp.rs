@@ -450,7 +450,7 @@ mod tests {
                     Ok((mut connection, _)) => {
                         let mut request = [0u8; 4096];
                         let _ = connection.read(&mut request);
-                        let body = "<html><head><title>Herdr fixture</title></head><body><button id='click' onclick=\"document.getElementById('state').textContent='clicked'\">Click</button><span id='state'>idle</span><input id='text'><form onsubmit=\"event.preventDefault();window.__submitted=true\"><button id='disguised-submit' type='submit'>Search</button></form><a id='destructive-link' href='/delete/account'>Search</a><script>window.__submitted=false</script></body></html>";
+                        let body = "<html><head><title>Herdr fixture</title></head><body><button id='click' onclick=\"document.getElementById('state').textContent='clicked'\">Click</button><span id='state'>idle</span><input id='text'><input id='otp' autocomplete='one-time-code' value='481902'><input id='card' autocomplete='cc-number' value='4111111111111111'><input id='pass' type='password' value='Secret1'><form onsubmit=\"event.preventDefault();window.__submitted=true\"><button id='disguised-submit' type='submit'>Search</button></form><a id='destructive-link' href='/delete/account'>Search</a><script>window.__submitted=false</script></body></html>";
                         let _ = write!(connection, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
                     }
                     Err(_) => std::thread::sleep(Duration::from_millis(10)),
@@ -486,6 +486,23 @@ mod tests {
             .expect("Chrome query over the real page");
         assert_eq!(query["count"], 1);
         assert_eq!(query["elements"][0]["tag"], "button");
+        // Observe through the real CDP page, not a mocked DOM. Ordinary
+        // text remains inspectable; credentials, OTPs and card numbers do not.
+        for selector in ["#otp", "#card", "#pass"] {
+            let value = crate::browser_api::run(&pane, "browser.inspect",
+                &json!({"target":{"css":selector}}), false, &cancelled)
+                .expect("bounded real Chrome DOM inspection");
+            assert_eq!(value["elements"][0]["value"], "[REDACTED]", "{selector}");
+        }
+        let original = crate::browser_api::run(&pane, "browser.inspect",
+            &json!({"target":{"css":"#text"}}), false, &cancelled).unwrap();
+        assert_eq!(original["elements"][0]["value"], "Herdr CDP input");
+        let error = crate::browser_api::run(&pane, "browser.fill",
+            &json!({"target":{"css":"#otp"},"value":"123456"}), false, &cancelled)
+            .expect_err("OTP must not be filled without native user approval");
+        assert!(error.starts_with("APPROVAL_REQUIRED"));
+        assert_eq!(pane.eval("document.getElementById('otp').value").unwrap(), "481902",
+            "rejected sensitive typing must leave the original code unchanged");
         let snapshot = crate::browser_api::run(&pane, "browser.snapshot",
             &json!({"max_nodes":50}), false, &cancelled)
             .expect("Chrome DOM snapshot");
