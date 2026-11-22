@@ -204,26 +204,34 @@ jobs:
           echo "- Cache write permitted: ${{ env.SAVE_CACHES }}" >> "$GITHUB_STEP_SUMMARY"
           echo "- DMG: Actions artifact only; stable release disabled until both real browser backends pass E2E" >> "$GITHUB_STEP_SUMMARY"
 
-  # Stable required status: green for docs-only, red for any mandatory build
-  # failure. A skipped heavy job must never hide a failed code build.
+  # Stable required status: for source changes, require the packaged
+  # app's real Chrome/WK CLI/MCP and native GPUI human authorization E2E.
+  # A green compile/package job must never conceal a failing application.
+  # For docs-only changes the heavy jobs must all be skipped.
   browser-ci:
     name: Browser CI required check
-    needs: [changes, browser-macos]
+    needs: [changes, browser-macos, wkwebview-native-e2e, browser-gpui-approval-e2e]
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: Enforce browser check result
+      - name: Enforce real packaged browser E2E results
         env:
           CLASSIFY_RESULT: ${{ needs.changes.result }}
           BUILD_REQUIRED: ${{ needs.changes.outputs.build }}
           BUILD_RESULT: ${{ needs.browser-macos.result }}
+          NATIVE_E2E_RESULT: ${{ needs.wkwebview-native-e2e.result }}
+          APPROVAL_E2E_RESULT: ${{ needs.browser-gpui-approval-e2e.result }}
         run: |
           set -euo pipefail
           [[ "$CLASSIFY_RESULT" == success ]] || exit 1
           if [[ "$BUILD_REQUIRED" == true ]]; then
             [[ "$BUILD_RESULT" == success ]] || exit 1
+            [[ "$NATIVE_E2E_RESULT" == success ]] || exit 1
+            [[ "$APPROVAL_E2E_RESULT" == success ]] || exit 1
           else
             [[ "$BUILD_RESULT" == skipped ]] || exit 1
+            [[ "$NATIVE_E2E_RESULT" == skipped ]] || exit 1
+            [[ "$APPROVAL_E2E_RESULT" == skipped ]] || exit 1
           fi
 
 
