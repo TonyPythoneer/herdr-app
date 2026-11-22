@@ -5123,7 +5123,7 @@ impl AppWindow {
             }).await;
             let _ = this.update(cx, |this, cx| {
                 let result: Result<Value, String> =
-                    if matches!(action.as_str(), "browser.click" | "browser.click_at" | "browser.press" | "browser.fill" | "browser.type") {
+                    if matches!(action.as_str(), "browser.click" | "browser.click_at" | "browser.press" | "browser.fill" | "browser.type" | "browser.scroll") {
                         result.and_then(|coordinates| {
                             if cancel.load(std::sync::atomic::Ordering::Acquire) {
                                 return Err("CANCELLED".into());
@@ -5139,6 +5139,12 @@ impl AppWindow {
                                 let key=coordinates["key"].as_str()
                                     .ok_or("INVALID_ARGUMENT: missing WK key")?;
                                 view.update(cx, |view, _| crate::wk_input::press_key(view, key))?;
+                            } else if action == "browser.scroll" {
+                                let x=coordinates["x"].as_f64().ok_or("INVALID_ARGUMENT: missing WK wheel X")?;
+                                let y=coordinates["y"].as_f64().ok_or("INVALID_ARGUMENT: missing WK wheel Y")?;
+                                let dx=coordinates["delta_x"].as_f64().ok_or("INVALID_ARGUMENT: missing WK wheel delta_x")?;
+                                let dy=coordinates["delta_y"].as_f64().ok_or("INVALID_ARGUMENT: missing WK wheel delta_y")?;
+                                view.update(cx, |view, _| crate::wk_input::scroll_at(view, x, y, dx, dy))?;
                             } else {
                                 let x=coordinates["x"].as_f64().ok_or("INVALID_ARGUMENT: missing native click X")?;
                                 let y=coordinates["y"].as_f64().ok_or("INVALID_ARGUMENT: missing native click Y")?;
