@@ -121,6 +121,7 @@ jobs:
       - name: Real GPUI/WKWebView child snapshot pixels (native AppKit)
         env:
           HERDR_WK_NATIVE_SMOKE: "1"
+          HERDR_APP_HOME: ${{ runner.temp }}/adapter-wk-native-pixels
         run: |
           set -euo pipefail
           cargo test --locked --config 'profile.dev.package."*".opt-level=0' --test wk_native_pixels 2>&1 | tee "$RUNNER_TEMP/wk-snapshot.log"
@@ -128,6 +129,7 @@ jobs:
       - name: Proof of trusted native WKWebView input in a visible child window
         env:
           HERDR_WK_NATIVE_INPUT_E2E: "1"
+          HERDR_APP_HOME: ${{ runner.temp }}/adapter-wk-native-input
         run: |
           set -euo pipefail
           cargo test --locked --config 'profile.dev.package."*".opt-level=0' --test wk_native_input 2>&1 | tee "$RUNNER_TEMP/wk-trusted-input.log"

@@ -3,16 +3,8 @@
 
 // Import the very same production snapshot code into the standalone E2E
 // binary, while providing an isolated screenshot directory.
-#[cfg(target_os = "macos")]
-mod mods {
-    use std::path::PathBuf;
-    pub fn app_dir() -> PathBuf {
-        std::env::temp_dir().join(format!("herdr-webview-wk-smoke-{}",std::process::id()))
-    }
-}
-#[cfg(target_os = "macos")]
-#[path = "../src/wk_native.rs"]
-mod wk_native;
+#[cfg(target_os="macos")]
+use herdr_webview_adapter::{app_home as mods, wk_native};
 
 #[cfg(target_os = "macos")]
 mod mac {
@@ -102,6 +94,7 @@ mod mac {
     }
 
     pub fn run() {
+        assert!(std::env::var_os("HERDR_APP_HOME").is_some(), "native screenshot E2E must set an isolated HERDR_APP_HOME");
         let (url, server)=fixture();
         let (report_tx,report_rx)=mpsc::channel();
         gpui_platform::application().run(move |cx| {

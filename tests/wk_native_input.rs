@@ -2,8 +2,7 @@
 #![cfg_attr(not(target_os="macos"), allow(dead_code,unused_imports))]
 
 #[cfg(target_os="macos")]
-#[path="../src/wk_input.rs"]
-mod wk_input;
+use herdr_webview_adapter::wk_input;
 
 #[cfg(target_os="macos")]
 mod mac {
