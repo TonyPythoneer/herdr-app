@@ -4165,6 +4165,7 @@ dependencies = [
  "block2 0.6.2",
  "fancy-regex 0.19.2",
  "ghostty-sys",
+ "herdr-webview-adapter",
  "gpui-base",
  "gpui-pre",
  "gpui-pre-linux",
@@ -4201,6 +4202,30 @@ dependencies = [
  "url",
  "windows-sys 0.61.2",
  "winresource",
+]
+
+[[package]]
+name = "herdr-webview-adapter"
+version = "0.1.0"
+source = "git+https://github.com/TonyPythoneer/herdr-webview-adapter?rev=6d2b5a8d555d8a276ac60e7eb51b26e8e94de4c9#6d2b5a8d555d8a276ac60e7eb51b26e8e94de4c9"
+dependencies = [
+ "base64",
+ "block2 0.6.2",
+ "gpui-pre",
+ "gpui-wry",
+ "image",
+ "lb-wry",
+ "libc",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-foundation 0.3.2",
+ "objc2-web-kit",
+ "serde_json",
+ "smallvec",
+ "tracing",
+ "url",
 ]
 
 [[package]]
