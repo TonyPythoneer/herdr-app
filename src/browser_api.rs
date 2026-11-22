@@ -62,7 +62,8 @@ const sensitive=e=>{
 };
 const summary=e=>{
   const b=e.getBoundingClientRect();
-  return {ref:path(e),role:role(e),name:name(e),tag:e.tagName.toLowerCase(),text:simple(e.textContent),
+  return {ref:path(e),role:role(e),name:sensitive(e)?'[REDACTED]':name(e),
+    tag:e.tagName.toLowerCase(),text:sensitive(e)?'[REDACTED]':simple(e.textContent),
     visible:visible(e),enabled:!e.disabled&&e.getAttribute('aria-disabled')!=='true',
     bounds:{x:b.x,y:b.y,width:b.width,height:b.height},
     value:sensitive(e)?'[REDACTED]':
@@ -119,22 +120,18 @@ pub fn run(session:&Arc<Session>,command:&str,args:&Value,approved:bool,cancelle
     let result=match command {
         "browser.snapshot"=>{
             let max=args.get("max_nodes").and_then(Value::as_u64).unwrap_or(100).clamp(1,400);
+            // Snapshot, query and inspect MUST share the same bounded,
+            // sensitive-field-aware DOM serializer. A separate snapshot
+            // mapper previously bypassed the redaction used by inspect.
             let expression=format!(r#"(() => {{
+const t=null;
+{DOM_HELPERS}
 const nodes=[...document.querySelectorAll('a,button,input,textarea,select,[role],[tabindex],h1,h2,h3')];
 const items=[];
 for(const el of nodes){{
  if(items.length>={max})break;
- const b=el.getBoundingClientRect(),s=getComputedStyle(el);
- if(b.width<=0||b.height<=0||s.visibility==='hidden'||s.display==='none')continue;
- const p=[];let cur=el;
- for(let i=0;cur&&cur.nodeType===1&&i<15;i++,cur=cur.parentElement){{
-  const peers=cur.parentElement?[...cur.parentElement.children].filter(x=>x.tagName===cur.tagName):[cur];
-  p.unshift(cur.tagName.toLowerCase()+':nth-of-type('+(peers.indexOf(cur)+1)+')');
- }}
- items.push({{ref:p.join(' > '),tag:el.tagName.toLowerCase(),
-  role:el.getAttribute('role')||el.tagName.toLowerCase(),
-  name:String(el.getAttribute('aria-label')||el.labels&&el.labels[0]&&el.labels[0].textContent||el.textContent||'').trim().slice(0,180),
-  enabled:!el.disabled,bounds:{{x:b.x,y:b.y,width:b.width,height:b.height}}}});
+ if(!visible(el))continue;
+ items.push(summary(el));
 }}
 return {{snapshot_id:String(performance.timeOrigin)+'|'+location.href,
 document_id:String(performance.timeOrigin)+'|'+location.href,
@@ -308,6 +305,15 @@ mod tests {
         assert!(ensure_private_screenshot_dir(&alias).unwrap_err().contains("symlink"));
         fs::remove_dir_all(parent).unwrap();
     }
+    #[test]
+    fn chrome_snapshot_and_inspect_share_sensitive_redaction(){
+        let source=include_str!("browser_api.rs");
+        assert!(source.contains("{DOM_HELPERS}"),"snapshot must embed shared DOM helpers");
+        assert!(source.contains("items.push(summary(el))"),"snapshot must use redacting summary");
+        assert!(DOM_HELPERS.contains("name:sensitive(e)?'[REDACTED]'"));
+        assert!(DOM_HELPERS.contains("text:sensitive(e)?'[REDACTED]'"));
+    }
+
     #[test]
     fn shared_dom_helper_redacts_passwords_otp_and_card_fields(){
         for marker in ["current-password","one-time-code","cc-","api.?key","[REDACTED]"] {
