@@ -136,7 +136,16 @@ const b=el.getBoundingClientRect(),x=b.x+b.width/2,y=b.y+b.height/2;
 const top=document.elementFromPoint(x,y);
 if(!top||(top!==el&&!el.contains(top)))return {error:'ELEMENT_OBSCURED'};
 const label=name(el).toLowerCase();
-const dangerous=/pay|buy|purchase|checkout|send|delete|remove|transfer|publish|confirm|order|submit|unsubscribe|account/i.test(label);
+// A harmless-looking label does not make a submit button or a destructive
+// destination safe. This is a conservative preflight; native approval is
+// still required before clicking unknown controls.
+const form=el.closest('form');
+const submits=(el.tagName==='BUTTON'||el.tagName==='INPUT')&&el.type==='submit'
+  &&(!form||form.getAttribute('role')!=='search');
+const href=el.tagName==='A'?el.getAttribute('href')||'':'';
+const riskyHref=/(?:^|[/?#&=_-])(pay|purchase|checkout|delete|remove|transfer|confirm|order|submit|unsubscribe|logout)(?:[/?#&=_-]|$)/i.test(href);
+const dangerous=/pay|buy|purchase|checkout|send|delete|remove|transfer|publish|confirm|order|submit|unsubscribe|account/i.test(label)
+  ||submits||riskyHref;
 const known=(el.tagName==='A'&&/^https?:/.test(el.href))||
  /^(search|next|back|previous|open|close|show|hide|expand|collapse|filter|play|pause)$/i.test(label);
 return {x,y,dangerous,unknown:!known,label:label.slice(0,120)};"#)?;
@@ -180,7 +189,11 @@ el.focus();return {ready:true,sensitive:el.type==='password'||(el.autocomplete||
         }
         "browser.press"=>{
             let key=required(args,"key")?;
-            if key=="Enter"&&!approved{return Err("APPROVAL_REQUIRED: Enter could submit a form".into())}
+            // Return aliases Enter, and Space can activate a focused button. Neither
+            // may bypass the native human-approval gate through a different key name.
+            if matches!(key, "Enter" | "Return" | "Space") && !approved {
+                return Err("APPROVAL_REQUIRED: native key could submit or activate a site action".into());
+            }
             if let Some(loc)=args.get("target"){unique(session,loc,"el.focus();return {focused:true};")?;}
             let mapped=match key {
                 "Enter"|"Return"=>"Enter","Escape"=>"Escape","Tab"=>"Tab",
