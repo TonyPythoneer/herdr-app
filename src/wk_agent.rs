@@ -40,6 +40,45 @@ url:location.href,elements,truncated:nodes.length>elements.length}}}};
             let limit = if command == "browser.inspect" {1} else {50};
             format!("const els=select();return {{ok:true,result:{{count:els.length,truncated:els.length>{limit},elements:els.slice(0,{limit}).map(summary)}}}};")
         }
+        "browser.wait" => {
+            let condition=args.get("condition").and_then(Value::as_object)
+                .ok_or("INVALID_ARGUMENT: wait condition must be an object")?;
+            if condition.is_empty() || condition.len()>4
+                || condition.keys().any(|key| !["url","selector","state","text"].contains(&key.as_str())) {
+                return Err("INVALID_ARGUMENT: unsupported or empty wait condition".into());
+            }
+            for (key, value) in condition {
+                let text=value.as_str().ok_or("INVALID_ARGUMENT: wait fields must be strings")?;
+                let limit=if key=="url"{2048}else{512};
+                if text.is_empty()||text.len()>limit {
+                    return Err(format!("INVALID_ARGUMENT: wait condition.{key} is too long or empty"));
+                }
+            }
+            if condition.contains_key("state") &&
+                (!condition.contains_key("selector") ||
+                 !["visible","hidden"].contains(&condition["state"].as_str().unwrap_or("")))
+            {
+                return Err("INVALID_ARGUMENT: state requires selector and visible|hidden".into());
+            }
+            if !condition.contains_key("url") && !condition.contains_key("selector") && !condition.contains_key("text") {
+                return Err("INVALID_ARGUMENT: wait needs a URL, selector or text condition".into());
+            }
+            if args.get("timeout_ms").is_some_and(|v| v.as_u64().is_none_or(|t| t==0 || t>30000)) {
+                return Err("INVALID_ARGUMENT: timeout_ms must be 1..30000".into());
+            }
+            let cond_json=Value::Object(condition.clone()).to_string();
+            format!(r#"
+const c={cond_json};let matched=true;
+if(c.url!==undefined)matched=matched&&location.href.includes(c.url);
+if(c.selector!==undefined){{
+ const el=document.querySelector(c.selector);
+ const shown=!!el&&visible(el);
+ matched=matched&&(c.state==='hidden'?!shown:shown);
+}}
+if(c.text!==undefined)matched=matched&&!!document.body&&document.body.innerText.includes(c.text);
+return {{ok:true,result:{{matched:!!matched,url:location.href}}}};
+"#)
+        }
         "browser.eval" => {
             if !approved {
                 return Err("APPROVAL_REQUIRED: arbitrary JavaScript can bypass website action permissions".into());
@@ -99,6 +138,20 @@ mod tests {
         assert!(script("browser.query", &json!({"target":{"css":"button","text":"Search"}}),false).is_err());
         assert!(script("browser.query", &json!({"target":{"css":"button","x":12}}),false).is_err());
         assert!(script("browser.click", &json!({"target":{"css":"button"}}),true).is_err());
+    }
+    #[test]
+    fn wk_wait_supports_typed_conditions_without_injecting_js_literals() {
+        let generated=script("browser.wait",&json!({
+            "condition":{"selector":"#submit","state":"visible","text":"Done","url":"/next"},
+            "timeout_ms":1500
+        }),false).unwrap();
+        assert!(generated.contains("document.querySelector(c.selector)"));
+        assert!(generated.contains("matched:!!matched"));
+        assert!(generated.contains("\"selector\":\"#submit\""));
+        assert!(script("browser.wait",&json!({"condition":{"state":"hidden"}}),false).is_err());
+        assert!(script("browser.wait",&json!({"condition":{"selector":"input","state":"bogus"}}),false).is_err());
+        assert!(script("browser.wait",&json!({"condition":{"selector":"input"},"timeout_ms":30001}),false).is_err());
+        assert!(script("browser.wait",&json!({"condition":{"selector":"input","exec":"alert(1)"}}),false).is_err());
     }
     #[test]
     fn arbitrary_eval_requires_the_native_approval_flow() {
