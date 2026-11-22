@@ -99,6 +99,32 @@ return {{ok:true,result:{{x,y,native:true,document_id:current,label}}}};
             }
             format!("return {{ok:true,result:{{x:{x},y:{y},native:true}}}};")
         }
+        "browser.press" => {
+            let key=args.get("key").and_then(Value::as_str)
+                .ok_or("INVALID_ARGUMENT: native WK key is required")?;
+            if !["Enter","Return","Escape","Tab","Backspace","Delete",
+                  "ArrowLeft","ArrowRight","ArrowDown","ArrowUp","Space"].contains(&key) {
+                return Err("INVALID_ARGUMENT: unsupported native WK key".into());
+            }
+            if matches!(key,"Enter"|"Return"|"Space") && !approved {
+                return Err("APPROVAL_REQUIRED: native key could submit or activate a site action".into());
+            }
+            let target = args.get("target");
+            let focus = if let Some(target) = target {
+                let object=target.as_object().ok_or("INVALID_ARGUMENT: press target must be a locator object")?;
+                if object.len()!=1 || object.get("css").and_then(Value::as_str).is_none_or(|s| s.is_empty()||s.len()>512) {
+                    return Err("INVALID_ARGUMENT: press target supports a bounded CSS selector only".into());
+                }
+                format!(r#"
+const matches=select();
+if(matches.length!==1)return {{ok:false,error:matches.length===0?'LOCATOR_NOT_FOUND':'LOCATOR_AMBIGUOUS'}};
+if(!visible(matches[0]))return {{ok:false,error:'ELEMENT_NOT_ACTIONABLE'}};
+matches[0].focus();
+"#)
+            } else { String::new() };
+            let key=serde_json::to_string(key).map_err(|e|e.to_string())?;
+            format!("{focus}return {{ok:true,result:{{key:{key},native:true}}}};")
+        }
         "browser.wait" => {
             let condition=args.get("condition").and_then(Value::as_object)
                 .ok_or("INVALID_ARGUMENT: wait condition must be an object")?;
@@ -153,7 +179,7 @@ return {{ok:true,result:{{matched:!!matched,url:location.href}}}};
         }
         _ => return Err("UNSUPPORTED_ENGINE: WKWebView native input/screenshots are not yet implemented".into()),
     };
-    let target = if matches!(command, "browser.query" | "browser.inspect" | "browser.click") {
+    let target = if matches!(command, "browser.query" | "browser.inspect" | "browser.click" | "browser.press") {
         args["target"].clone()
     } else { Value::Null };
     Ok(format!(r#"(() => {{
@@ -231,6 +257,16 @@ mod tests {
         assert!(script("browser.click_at",&json!({"x":-1,"y":30}),true).is_err());
         assert!(parse_callback(r#"{"ok":false,"error":"APPROVAL_REQUIRED: confirm deletion"}"#)
             .unwrap_err().starts_with("APPROVAL_REQUIRED:"));
+    }
+    #[test]
+    fn native_keypress_is_allowlisted_and_submission_requires_approval() {
+        assert!(script("browser.press", &json!({"key":"Tab"}), false).unwrap().contains("native:true"));
+        assert!(script("browser.press", &json!({"key":"Enter"}), false).unwrap_err().starts_with("APPROVAL_REQUIRED:"));
+        assert!(script("browser.press", &json!({"key":"Enter"}), true).unwrap().contains("native:true"));
+        assert!(script("browser.press", &json!({"key":"a"}), true).is_err());
+        assert!(script("browser.press", &json!({"key":"Tab","target":{"css":"#field"}}), false)
+            .unwrap().contains("matches[0].focus()"));
+        assert!(script("browser.press", &json!({"key":"Tab","target":{"text":"unsafe"}}),false).is_err());
     }
     #[test]
     fn arbitrary_eval_requires_the_native_approval_flow() {

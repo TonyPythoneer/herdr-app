@@ -3,7 +3,7 @@
 //! This module is intentionally NOT wired into Agent commands until a real
 //! macOS E2E verifies the website receives a trusted event.
 use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType};
-use objc2_foundation::NSPoint;
+use objc2_foundation::{NSPoint, NSString};
 use wry::WebViewExtMacOS;
 
 #[derive(Clone, Copy, Debug)]
@@ -59,9 +59,72 @@ pub fn click_at(view: &gpui_wry::WebView, css_x: f64, css_y: f64) -> Result<(), 
     Ok(())
 }
 
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct NativeKey {
+    code: u16,
+    chars: &'static str,
+}
+
+/// Allowlisted native WebKit navigation keys. Arbitrary text is deliberately
+/// NOT accepted here; it needs a separate tested native text-entry operation.
+fn key_info(key: &str) -> Result<NativeKey, String> {
+    let (code, chars) = match key {
+        "Enter" | "Return" => (36, "\r"),
+        "Escape" => (53, "\u{001b}"),
+        "Tab" => (48, "\t"),
+        "Backspace" => (51, "\u{0008}"),
+        "Delete" => (117, "\u{007f}"),
+        "Space" => (49, " "),
+        "ArrowLeft" => (123, "\u{f702}"),
+        "ArrowRight" => (124, "\u{f703}"),
+        "ArrowDown" => (125, "\u{f701}"),
+        "ArrowUp" => (126, "\u{f700}"),
+        _ => return Err("INVALID_ARGUMENT: unsupported WKWebView native key".into()),
+    };
+    Ok(NativeKey { code, chars })
+}
+
+/// Send an actual AppKit keyDown/keyUp to the active WKWebView responder.
+/// Caller must focus the correct field and get native approval for keys that
+/// can submit an irreversible form before entering this function.
+pub fn press_key(view: &gpui_wry::WebView, key: &str) -> Result<(), String> {
+    let key = key_info(key)?;
+    if !view.visible() {
+        return Err("BROWSER_NOT_VISIBLE: native keyboard requires active WKWebView pane".into());
+    }
+    let wk = view.raw().webview();
+    let window = wk.window().ok_or("BROWSER_NOT_READY: WKWebView has no native window")?;
+    if !window.isKeyWindow() {
+        return Err("BROWSER_NOT_FOCUSED: activate the Herdr window before native keyboard input".into());
+    }
+    let chars = NSString::from_str(key.chars);
+    let loc = NSPoint::new(0.0, 0.0);
+    let number = window.windowNumber();
+    let down = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+        NSEventType::KeyDown, loc, NSEventModifierFlags::empty(), 0.0,
+        number, None, &chars, &chars, false, key.code,
+    ).ok_or("NATIVE_INPUT_FAILED: could not construct native keyDown")?;
+    let up = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+        NSEventType::KeyUp, loc, NSEventModifierFlags::empty(), 0.0,
+        number, None, &chars, &chars, false, key.code,
+    ).ok_or("NATIVE_INPUT_FAILED: could not construct native keyUp")?;
+    window.sendEvent(&down);
+    window.sendEvent(&up);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn only_known_native_webkit_keys_are_dispatched() {
+        assert_eq!(key_info("Tab").unwrap(), NativeKey { code:48, chars:"\t" });
+        assert_eq!(key_info("Enter").unwrap().code, 36);
+        for invalid in ["a","Command+Q","Meta+A","","Shift+Enter"] {
+            assert!(key_info(invalid).is_err(), "{invalid}");
+        }
+    }
     #[test]
     fn native_input_checks_viewport_and_flipped_coordinates() {
         let p = to_native_point(60.0, 20.0, 100.0, 100.0, false).unwrap();
