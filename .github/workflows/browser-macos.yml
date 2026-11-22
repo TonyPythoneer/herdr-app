@@ -225,3 +225,68 @@ jobs:
           else
             [[ "$BUILD_RESULT" == skipped ]] || exit 1
           fi
+
+
+  # Actual packaged-app E2E, not the isolated GPUI/WK fixture in the build job.
+  # Uses the official herdr-core in a disposable HOME and a loopback fixture.
+  # Both browser engines must work through the shipped CLI and stdio MCP.
+  wkwebview-native-e2e:
+    name: wkwebview-native-e2e
+    needs: [changes, browser-macos]
+    if: needs.changes.outputs.build == 'true' && needs.browser-macos.result == 'success'
+    runs-on: macos-15
+    timeout-minutes: 35
+    steps:
+      - name: Checkout exact tested source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download the actual updater archive from this same workflow run
+        uses: actions/download-artifact@v4
+        with:
+          name: Herdr-WebView-updater-assets
+          path: dist
+      - name: Extract and verify the shipped binary and signed app
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -xzf dist/herdr-app-macos-aarch64.tar.gz -C dist
+          app='dist/Herdr WebView.app'
+          test -x "$app/Contents/MacOS/Herdr"
+          codesign --verify --deep --strict "$app"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")" = 'dev.herdr.webview'
+          cmp assets/icons/Herdr.icns "$app/Contents/Resources/Herdr.icns"
+          "$app/Contents/MacOS/Herdr" --version
+      - name: Install real official herdr-core in an ephemeral location
+        shell: bash
+        run: |
+          set -euo pipefail
+          core_dir="$RUNNER_TEMP/webview-e2e-core"
+          mkdir -p "$core_dir"
+          curl -fsSL --retry 3 https://releases.herdr.dev/core/install.sh -o "$RUNNER_TEMP/herdr-core-install.sh"
+          HC_INSTALL_DIR="$core_dir" sh "$RUNNER_TEMP/herdr-core-install.sh"
+          core="$core_dir/herdr-core"
+          if [[ ! -x "$core" ]]; then core="$core_dir/hc"; fi
+          test -x "$core"
+          "$core" --version | grep '^hc '
+          echo "WEBVIEW_E2E_CORE=$core" >> "$GITHUB_ENV"
+      - name: Real Herdr WebView packaged WKWebView browser via CLI and MCP
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/webview_packaged_e2e.py \
+            --app 'dist/Herdr WebView.app/Contents/MacOS/Herdr' \
+            --core "$WEBVIEW_E2E_CORE" --engine wkwebview \
+            2>&1 | tee "$RUNNER_TEMP/packaged-wk-e2e.log"
+          grep -Fq 'PACKAGED_BROWSER_E2E_VERIFIED: wkwebview complete' "$RUNNER_TEMP/packaged-wk-e2e.log"
+          grep -Fq 'PACKAGED_MCP_VERIFIED:' "$RUNNER_TEMP/packaged-wk-e2e.log"
+      - name: Real Herdr WebView packaged Chrome CDP browser via CLI and MCP
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
+          python3 scripts/webview_packaged_e2e.py \
+            --app 'dist/Herdr WebView.app/Contents/MacOS/Herdr' \
+            --core "$WEBVIEW_E2E_CORE" --engine chrome-cdp \
+            2>&1 | tee "$RUNNER_TEMP/packaged-chrome-e2e.log"
+          grep -Fq 'PACKAGED_BROWSER_E2E_VERIFIED: chrome-cdp complete' "$RUNNER_TEMP/packaged-chrome-e2e.log"
