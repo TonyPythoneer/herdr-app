@@ -141,13 +141,13 @@ mod tests {
     }
     #[test]
     fn wk_wait_supports_typed_conditions_without_injecting_js_literals() {
-        let script=script("browser.wait",&json!({
+        let generated=script("browser.wait",&json!({
             "condition":{"selector":"#submit","state":"visible","text":"Done","url":"/next"},
             "timeout_ms":1500
         }),false).unwrap();
-        assert!(script.contains("document.querySelector(c.selector)"));
-        assert!(script.contains("matched:!!matched"));
-        assert!(script.contains("\"selector\":\"#submit\""));
+        assert!(generated.contains("document.querySelector(c.selector)"));
+        assert!(generated.contains("matched:!!matched"));
+        assert!(generated.contains("\"selector\":\"#submit\""));
         assert!(script("browser.wait",&json!({"condition":{"state":"hidden"}}),false).is_err());
         assert!(script("browser.wait",&json!({"condition":{"selector":"input","state":"bogus"}}),false).is_err());
         assert!(script("browser.wait",&json!({"condition":{"selector":"input"},"timeout_ms":30001}),false).is_err());
