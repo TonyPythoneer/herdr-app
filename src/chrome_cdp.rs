@@ -252,7 +252,13 @@ impl Client {
 
     pub fn open(self: &Arc<Self>, url: &str) -> Result<Session, String> {
         let url = crate::browser::normalize_url(url)?;
-        let target = self.request("Target.createTarget", json!({"url":"about:blank"}), None)?
+        // Create the real destination directly as the first page in the target.
+        // The old about:blank -> Page.startScreencast -> Page.navigate sequence
+        // consistently hangs ONLY in the packaged GUI app (while the isolated
+        // Rust fixture passes), even with off-thread PNG decoding/ACK writes.
+        // Target.createTarget(url) lets Chrome navigate during target creation,
+        // before any screen frames or CDP per-target commands are subscribed.
+        let target = self.request("Target.createTarget", json!({"url":url}), None)?
             .get("targetId").and_then(Value::as_str).ok_or("CDP targetId missing")?.to_owned();
         let session = self.request("Target.attachToTarget", json!({"targetId":target,"flatten":true}), None)?
             .get("sessionId").and_then(Value::as_str).ok_or("CDP sessionId missing")?.to_owned();
@@ -262,13 +268,10 @@ impl Client {
         pane.command("Page.enable", json!({}))?;
         pane.command("Runtime.enable", json!({}))?;
         pane.resize(1024, 768)?;
-        // Start capture on the attached about:blank target before navigation:
-        // some Chrome builds detach the initial page session during navigation
-        // and reject a later Page.startScreencast as "Not attached to an active page".
-        // The reader thread does no PNG decoding, so frame traffic cannot
-        // monopolize the CDP reply dispatcher during Page.navigate.
+        // Only start screencasting after the destination target is attached.
+        // No Page.navigate is issued with an already-running frame producer
+        // during startup. User-initiated navigation still uses Page.navigate.
         pane.command("Page.startScreencast", json!({"format":"png","everyNthFrame":1}))?;
-        pane.navigate(&url)?;
         Ok(pane)
     }
 }
