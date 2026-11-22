@@ -14,6 +14,8 @@ mod browser_api;
 #[cfg(target_os = "macos")]
 mod wk_agent;
 #[cfg(target_os = "macos")]
+mod wk_native;
+#[cfg(target_os = "macos")]
 mod browser_mcp;
 mod commands;
 mod control;
