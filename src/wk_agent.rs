@@ -77,8 +77,13 @@ const x=box.x+box.width/2,y=box.y+box.height/2;
 const top=document.elementFromPoint(x,y);
 if(!top||(top!==el&&!el.contains(top)))return {{ok:false,error:'ELEMENT_OBSCURED'}};
 const label=name(el).toLowerCase().slice(0,100);
+const form=el.closest('form');
+const submits=(el.tagName==='BUTTON'||el.tagName==='INPUT')&&el.type==='submit'
+    &&(!form||form.getAttribute('role')!=='search');
+const href=el.tagName==='A'?el.getAttribute('href')||'':'';
+const riskyHref=/(?:^|[/?#&=_-])(pay|purchase|checkout|delete|remove|transfer|confirm|order|submit|unsubscribe|logout)(?:[/?#&=_-]|$)/i.test(href);
 const dangerous=/pay|buy|purchase|checkout|send|delete|remove|transfer|publish|confirm|order|submit|unsubscribe|account|save|security/i.test(label)
-    ||(el.tagName==='BUTTON'&&el.type==='submit'&&!el.closest('form[role=search]'));
+    ||submits||riskyHref;
 const known=(el.tagName==='A'&&/^https?:/.test(el.href))||
  /^(search|next|back|previous|open|close|show|hide|expand|collapse|filter|play|pause)$/i.test(label);
 if(!{approved}&&(dangerous||!known))
@@ -119,7 +124,7 @@ return {{ok:true,result:{{x,y,native:true,document_id:current,label}}}};
 const els=select();if(els.length!==1)return {{ok:false,error:els.length===0?'LOCATOR_NOT_FOUND':'LOCATOR_AMBIGUOUS'}};
 const el=els[0];if(!visible(el)||el.disabled||el.readOnly)return {{ok:false,error:'ELEMENT_NOT_ACTIONABLE'}};
 if(!['INPUT','TEXTAREA'].includes(el.tagName)&&!el.isContentEditable)return {{ok:false,error:'NOT_EDITABLE'}};
-if((el.type==='password'||(el.autocomplete||'').startsWith('cc-'))&&!{approved})
+if(sensitive(el)&&!{approved})
  return {{ok:false,error:'APPROVAL_REQUIRED: typing sensitive form values'}};
 el.focus();{select}
 return {{ok:true,result:{{native:true,text_ready:true}}}};
@@ -284,6 +289,16 @@ mod tests {
         assert!(parse_callback(r#"{"ok":false,"error":"APPROVAL_REQUIRED: confirm deletion"}"#)
             .unwrap_err().starts_with("APPROVAL_REQUIRED:"));
     }
+    #[test]
+    fn wk_uses_shared_sensitive_input_and_destructive_destination_policy() {
+        let click=script("browser.click",&json!({"target":{"css":"a"}}),false).unwrap();
+        assert!(click.contains("riskyHref"));
+        assert!(click.contains("el.type==='submit'"));
+        let fill=script("browser.fill",&json!({"target":{"css":"#otp"},"value":"481902"}),false).unwrap();
+        assert!(fill.contains("sensitive(el)"));
+        assert!(fill.contains("one-time-code"),"must include shared OTP redaction policy");
+    }
+
     #[test]
     fn native_text_entry_has_bounded_locator_and_never_evaluates_input_as_js() {
         let fill=script("browser.fill",&json!({"target":{"css":"#field"},"value":"Hello World"}),false).unwrap();
