@@ -4207,7 +4207,7 @@ dependencies = [
 [[package]]
 name = "herdr-webview-adapter"
 version = "0.1.0"
-source = "git+https://github.com/TonyPythoneer/herdr-webview-adapter?rev=38f57321e8f913078333f4ef7cc279ac9982ae5c#38f57321e8f913078333f4ef7cc279ac9982ae5c"
+source = "git+https://github.com/TonyPythoneer/herdr-webview-adapter?rev=171d297a759224916901bc20d89b2c3dec6fe1a9#171d297a759224916901bc20d89b2c3dec6fe1a9"
 dependencies = [
  "base64",
  "block2 0.6.2",
@@ -4222,6 +4222,7 @@ dependencies = [
  "objc2-core-graphics",
  "objc2-foundation 0.3.2",
  "objc2-web-kit",
+ "raw-window-handle 0.6.2",
  "serde_json",
  "smallvec",
  "tracing",
