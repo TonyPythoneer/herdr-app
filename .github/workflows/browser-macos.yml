@@ -290,3 +290,69 @@ jobs:
             --core "$WEBVIEW_E2E_CORE" --engine chrome-cdp \
             2>&1 | tee "$RUNNER_TEMP/packaged-chrome-e2e.log"
           grep -Fq 'PACKAGED_BROWSER_E2E_VERIFIED: chrome-cdp complete' "$RUNNER_TEMP/packaged-chrome-e2e.log"
+
+
+  # Real GPUI approval. An independent macOS process sends OS UI input into
+  # the *packaged* app's live approval dialog, not a debug API or mock callback.
+  # Both allowed and denied actions must have observable DOM postconditions.
+  browser-gpui-approval-e2e:
+    name: browser-gpui-approval-e2e
+    needs: [changes, browser-macos]
+    if: needs.changes.outputs.build == 'true' && needs.browser-macos.result == 'success'
+    runs-on: macos-15
+    timeout-minutes: 35
+    steps:
+      - name: Checkout exact tested source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download the real macOS App package
+        uses: actions/download-artifact@v4
+        with:
+          name: Herdr-WebView-updater-assets
+          path: dist
+      - name: Verify the real macOS app and prepare native OS input driver
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -xzf dist/herdr-app-macos-aarch64.tar.gz -C dist
+          app='dist/Herdr WebView.app'
+          test -x "$app/Contents/MacOS/Herdr"
+          codesign --verify --deep --strict "$app"
+          swiftc -O -o "$RUNNER_TEMP/herdr-native-approval-driver" \
+            scripts/webview_gpui_approval_driver.swift
+          test -x "$RUNNER_TEMP/herdr-native-approval-driver"
+      - name: Install official herdr-core into a disposable test home
+        shell: bash
+        run: |
+          set -euo pipefail
+          core_dir="$RUNNER_TEMP/webview-gpui-e2e-core"
+          mkdir -p "$core_dir"
+          curl -fsSL --retry 3 https://releases.herdr.dev/core/install.sh -o "$RUNNER_TEMP/herdr-core-install.sh"
+          HC_INSTALL_DIR="$core_dir" sh "$RUNNER_TEMP/herdr-core-install.sh"
+          core="$core_dir/herdr-core"
+          if [[ ! -x "$core" ]]; then core="$core_dir/hc"; fi
+          test -x "$core"
+          "$core" --version | grep '^hc '
+          echo "WEBVIEW_E2E_CORE=$core" >> "$GITHUB_ENV"
+      - name: Actual GPUI approval and denial in packaged WKWebView
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/webview_packaged_e2e.py \
+            --app 'dist/Herdr WebView.app/Contents/MacOS/Herdr' \
+            --core "$WEBVIEW_E2E_CORE" --engine wkwebview \
+            --approval-driver "$RUNNER_TEMP/herdr-native-approval-driver" \
+            2>&1 | tee "$RUNNER_TEMP/approval-wk-e2e.log"
+          grep -Fq 'PACKAGED_GPUI_APPROVAL_E2E_VERIFIED:' "$RUNNER_TEMP/approval-wk-e2e.log"
+      - name: Actual GPUI approval and denial in packaged Chrome CDP
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
+          python3 scripts/webview_packaged_e2e.py \
+            --app 'dist/Herdr WebView.app/Contents/MacOS/Herdr' \
+            --core "$WEBVIEW_E2E_CORE" --engine chrome-cdp \
+            --approval-driver "$RUNNER_TEMP/herdr-native-approval-driver" \
+            2>&1 | tee "$RUNNER_TEMP/approval-chrome-e2e.log"
+          grep -Fq 'PACKAGED_GPUI_APPROVAL_E2E_VERIFIED:' "$RUNNER_TEMP/approval-chrome-e2e.log"
