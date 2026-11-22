@@ -35,12 +35,14 @@ mod mac {
             let n=conn.read(&mut buf).unwrap_or(0);
             assert!(String::from_utf8_lossy(&buf[..n]).starts_with("GET / HTTP/1.1"));
             let html=r#"<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1">
-<body style="margin:0;background:white">
+<body style="margin:0;background:white;height:2200px">
 <button id="trusted" style="position:absolute;left:20px;top:20px;width:120px;height:60px">Tap</button>
 <div id="status" style="position:absolute;top:120px">pending</div>
 <input id="field" aria-label="Field" style="position:absolute;top:175px;left:20px;width:120px;height:35px">
 <script>
 window.__pressed=false;window.__trusted=false;window.__keyTrusted=false;window.__textTrusted=false;
+window.__wheelTrusted=false;
+window.addEventListener('wheel',(e)=>{window.__wheelTrusted=e.isTrusted;});
 document.getElementById('field').addEventListener('keydown',(e)=>{
  if(e.key==='H' || e.key==='i')window.__textTrusted=e.isTrusted;
 });
@@ -117,7 +119,25 @@ document.getElementById('trusted').addEventListener('click',(e)=>{
                                 .await.unwrap_or_default();
                             if result=="true" {
                                 eprintln!("WK_TRUSTED_TEXT_VERIFIED: native AppKit text produced trusted keydown and input value");
-                                return Ok(());
+                                // A wheel command counts only when the actual
+                                // embedded WebKit page both receives a trusted
+                                // wheel event AND moves its own scroll position.
+                                // A successful native API call alone is not proof.
+                                cx.update(|cx|web.update(cx,|v,_|
+                                    wk_input::scroll_at(v,80.0,120.0,0.0,260.0)))
+                                    .map_err(|e|format!("native WK wheel input rejected: {e}"))?;
+                                let mut observed=String::new();
+                                for _ in 0..35 {
+                                    observed=evaluate(&web,
+                                        "window.scrollY>30 && window.__wheelTrusted===true",cx)
+                                        .await.unwrap_or_default();
+                                    if observed=="true" {
+                                        eprintln!("WK_TRUSTED_WHEEL_VERIFIED: native wheel isTrusted=true and page scrollY advanced");
+                                        return Ok(());
+                                    }
+                                    cx.background_executor().timer(Duration::from_millis(100)).await;
+                                }
+                                return Err(format!("native WebKit wheel did not scroll the actual page with isTrusted=true: {observed}"));
                             }
                             cx.background_executor().timer(Duration::from_millis(100)).await;
                         }
