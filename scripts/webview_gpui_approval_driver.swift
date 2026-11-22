@@ -56,11 +56,23 @@ func click(at point: CGPoint) -> Bool {
                            mouseCursorPosition: point, mouseButton: .left) else {
         return false
     }
-    down.post(tap: .cghidEventTap)
+    // Sending to the target process avoids routing the click to an unrelated
+    // CI runner window that momentarily stole foreground focus. This still
+    // passes through macOS native UI event routing and requires TCC approval.
+    down.postToPid(pid)
     usleep(90_000)
-    up.post(tap: .cghidEventTap)
+    up.postToPid(pid)
     return true
 }
+
+// A background CI process may not have the foreground session when it runs.
+// Bring the exact packaged Herdr app to the front before sending OS events.
+let trusted = AXIsProcessTrusted()
+let target = NSRunningApplication(processIdentifier: pid)
+let activated = target?.activate(options: [.activateIgnoringOtherApps]) ?? false
+usleep(350_000)
+let frontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier
+print("GPUI_NATIVE_INPUT_DIAGNOSTIC: accessibility_trusted=\(trusted) activated=\(activated) frontmost=\(frontmost ?? -1) target=\(pid)", flush: true)
 
 // Prefer an actual accessibility button. The custom GPUI div's AXPress action,
 // when exposed, exercises exactly the live on_click native GPUI callback.
@@ -110,8 +122,9 @@ guard let window = ours.max(by: {
 let centerX = bx.doubleValue + bw.doubleValue / 2
 let centerY = by.doubleValue + bh.doubleValue / 2
 // Card is 520px wide, centered; two buttons are left aligned below the text.
-let point = CGPoint(x: centerX + (requested == "Approve once" ? -128 : -215),
+let point = CGPoint(x: centerX + (requested == "Approve once" ? -102 : -214),
                     y: centerY + 65)
+print("GPUI_NATIVE_INPUT_DIAGNOSTIC: window_origin=(\(bx),\(by)) size=(\(bw),\(bh)) click=(\(point.x),\(point.y)) label=\(requested)", flush: true)
 guard click(at: point) else {
     fputs("Failed to send a real Quartz pointer event\n", stderr)
     exit(1)
