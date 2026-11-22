@@ -2,7 +2,7 @@
 //! Synthetic DOM click() and dispatchEvent() are not substitutes for this.
 //! This module is intentionally NOT wired into Agent commands until a real
 //! macOS E2E verifies the website receives a trusted event.
-use objc2::MainThreadMarker;
+use objc2::{msg_send, MainThreadMarker, rc::Retained};
 use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType, NSScreen};
 use objc2_core_foundation::CGPoint;
 use objc2_core_graphics::{CGEvent, CGScrollEventUnit};
@@ -217,9 +217,27 @@ pub fn scroll_at(view:&gpui_wry::WebView, css_x:f64, css_y:f64,
     CGEvent::set_location(Some(&cg),global);
     let native=NSEvent::eventWithCGEvent(&cg)
         .ok_or("NATIVE_INPUT_FAILED: cannot create WK wheel NSEvent")?;
-    // WebKit's own WTR dispatches directly to its view, rather than the outer
-    // window (which might route wheel input to Herdr's terminal/split chrome).
-    wk.scrollWheel(&native);
+    // Unlike mouseEventWithType, eventWithCGEvent has windowNumber=0 and no
+    // NSWindow associated with it. Directly calling WKWebView.scrollWheel()
+    // was observed to do nothing on real macOS CI (no trusted wheel and no
+    // scrollY change). WebKit's actual macOS WebDriver path performs the
+    // same window-relative conversion before [window sendEvent:].
+    //
+    // This is a narrowly scoped AppKit private selector. Fail closed when
+    // unavailable rather than silently fabricating a successful scroll. The
+    // supported long-term direction is an OS-provided public automation API.
+    // SAFETY: _eventRelativeToWindow: is an instance method taking an
+    // NSWindow pointer and returning an autoreleased NSEvent. Both classes
+    // and the selector signature are verified in WebKit's macOS automation.
+    let associated: Option<Retained<NSEvent>> = unsafe {
+        msg_send![&*native, _eventRelativeToWindow: &*window]
+    };
+    let associated=associated.ok_or(
+        "NATIVE_INPUT_FAILED: cannot associate wheel with the WK window")?;
+    if associated.windowNumber()!=window.windowNumber() {
+        return Err("NATIVE_INPUT_FAILED: WK wheel event targets a different window".into());
+    }
+    window.sendEvent(&associated);
     Ok(())
 }
 
