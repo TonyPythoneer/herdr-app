@@ -249,8 +249,15 @@ def run(app, core_bin, engine, approval_driver=None):
         print("Running {} from packaged {} with isolated home".format(engine, app.parent.parent.parent), flush=True)
         try:
             with log.open("w") as output:
+                # On macOS, setsid()/start_new_session severs the Aqua login
+                # session needed by Chromium renderer helpers. The standalone
+                # CDP fixture runs in the login session; packaged-app E2E must
+                # do the same instead of manufacturing a renderer startup failure.
+                # Cleanup below explicitly terminates and waits for this process.
                 child = subprocess.Popen([str(app)], env=env, stdout=output,
-                                         stderr=subprocess.STDOUT, start_new_session=True)
+                                         stderr=subprocess.STDOUT)
+                assert os.getsid(child.pid) == os.getsid(os.getpid()), (
+                    "packaged app must inherit the test runner login session")
                 try:
                     deadline = time.monotonic() + 100
                     last = ""
