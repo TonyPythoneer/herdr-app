@@ -407,6 +407,10 @@ mod tests {
         assert_eq!(notes[1].items[0].detail, "Another thing");
         assert!(notes[1].items[0].headline.is_empty());
         assert!(!notes[1].items[0].fixed);
-        assert_eq!(parse(include_str!("../CHANGELOG.md"))[0].version, env!("CARGO_PKG_VERSION"));
+        // The fork adds -webview.N to Cargo's version while reusing the
+        // upstream changelog until a fork-specific entry is published.
+        let running = env!("CARGO_PKG_VERSION");
+        let baseline = running.split_once("-webview.").map(|(base, _)| base).unwrap_or(running);
+        assert_eq!(parse(include_str!("../CHANGELOG.md"))[0].version, baseline);
     }
 }

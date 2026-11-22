@@ -1,0 +1,26 @@
+name: webview-release-manifest-tests
+
+on:
+  pull_request:
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - scripts/package
+      - scripts/webview_release_manifest.py
+      - scripts/test_webview_release_manifest.py
+      - .github/workflows/webview-release-manifest-tests.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  webview-release-manifest-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Validate release manifest generator
+        run: python3 -m unittest discover -s scripts -p 'test_webview_release_manifest.py' -v
