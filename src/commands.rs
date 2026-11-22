@@ -165,7 +165,16 @@ pub fn validate_args(c: &Command, args: &Value) -> Result<(), String> {
                 return Err(format!("{}: unknown argument(s): {}; valid arguments: {valid}", c.name, unknown.join(", ")));
             }
             for (key, value) in args {
-                if matches!(key.as_str(), "id" | "pane" | "space" | "terminal" | "target") && !value.is_string() && !value.is_null() {
+                // Browser locator targets are structured JSON objects (CSS, role,
+                // text, etc.), unlike the pane ID string used by pane.swap.
+                // Both CLI and MCP must enforce the same contract before dispatch.
+                if key == "target" && c.name.starts_with("browser.") {
+                    if !value.is_object() && !value.is_null() {
+                        return Err(format!("{}: browser target must be an object (or null to omit it)", c.name));
+                    }
+                } else if matches!(key.as_str(), "id" | "pane" | "space" | "terminal" | "target")
+                    && !value.is_string() && !value.is_null()
+                {
                     return Err(format!("{}: argument {key} must be a string (or null to omit it)", c.name));
                 }
             }
@@ -219,7 +228,14 @@ mod tests {
             assert!(validate_args(c, &Value::Null).is_ok());
             assert!(validate_args(c, &json!({})).is_ok());
             assert!(validate_args(c, &json!(["target"])).is_err());
-            let args: serde_json::Map<String, Value> = c.args.iter().map(|a| (a.name.into(), json!("target"))).collect();
+            let args: serde_json::Map<String, Value> = c.args.iter().map(|a| {
+                let value = if c.name.starts_with("browser.") && a.name == "target" {
+                    json!({"css":"#safe"})
+                } else {
+                    json!("target")
+                };
+                (a.name.into(), value)
+            }).collect();
             assert!(validate_args(c, &Value::Object(args)).is_ok());
         }
         let close = find("space.close").unwrap();
@@ -241,6 +257,24 @@ mod tests {
                 assert!(validate_args(c, &json!({arg: value})).is_ok());
             }
         }
+    }
+
+    #[test]
+    fn browser_locator_contract_accepts_objects_on_both_cli_and_mcp_paths() {
+        for name in ["browser.query", "browser.inspect", "browser.click",
+                     "browser.fill", "browser.type", "browser.press"] {
+            let command = find(name).unwrap();
+            assert!(validate_args(command, &json!({"pane":"p1","target":{"css":"#safe"}})).is_ok(),
+                "{name} must accept a structured locator");
+            for invalid in [json!("#safe"), json!(17), json!(true), json!([])] {
+                let error = validate_args(command, &json!({"pane":"p1","target":invalid})).unwrap_err();
+                assert!(error.contains("browser target must be an object"), "{name}: {error}");
+            }
+        }
+        let swap = find("pane.swap").unwrap();
+        assert!(validate_args(swap, &json!({"target":"other-pane"})).is_ok());
+        assert!(validate_args(swap, &json!({"target":{"css":"#unsafe"}})).is_err());
+        assert_eq!(missing(find("browser.query").unwrap(), &json!({"pane":"p1"})),Some("target"));
     }
 
     #[test]
