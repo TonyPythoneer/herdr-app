@@ -105,14 +105,17 @@ def browser_action(exe, env, name, pane, data=None, *, seconds=35):
     return await_job(exe, env, request, seconds=seconds)
 
 
-def until_ready(exe, env, pane, *, seconds=70):
+def until_ready(exe, env, pane, *, seconds=70, expected_url=None):
     deadline = time.monotonic() + seconds
     last = None
     while time.monotonic() < deadline:
         try:
             reply = browser_action(exe, env, "browser.snapshot", pane,
                                    {"max_nodes": 40}, seconds=18)
-            if reply["result"].get("title") == "Packaged Browser E2E":
+            page = reply["result"]
+            if (page.get("title") == "Packaged Browser E2E"
+                    and (expected_url is None
+                         or page.get("url", "").startswith(expected_url))):
                 return reply
             last = "unexpected page: title={!r}, url={!r}".format(
                 reply["result"].get("title"), reply["result"].get("url"))
@@ -262,7 +265,8 @@ def run(app, core_bin, engine, approval_driver=None):
                         next_url = url + "next"
                         action(app, env, "browser.navigate",
                                {"pane": pane, "url": next_url})
-                        navigated = until_ready(app, env, pane, seconds=30)
+                        navigated = until_ready(app, env, pane, seconds=30,
+                                                expected_url=next_url)
                         assert navigated["result"].get("url", "").startswith(next_url), navigated
                         print("PACKAGED_CHROME_NAVIGATE_VERIFIED: real pane navigated to /next",
                               flush=True)
