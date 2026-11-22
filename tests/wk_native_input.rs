@@ -11,6 +11,7 @@ mod mac {
     use raw_window_handle::HasWindowHandle;
     use std::{io::{Read,Write}, net::TcpListener, sync::mpsc, time::Duration};
     use super::wk_input;
+    use wry::WebViewExtMacOS;
 
     struct Scene { web: Entity<gpui_wry::WebView> }
     impl Render for Scene {
@@ -66,7 +67,14 @@ document.getElementById('trusted').addEventListener('click',(e)=>{
             cx.background_executor().timer(Duration::from_millis(100)).await;
         }
         if !loaded{return Err("WK input fixture did not load".into());}
-        cx.background_executor().timer(Duration::from_millis(250)).await;
+        // The macOS runner may show a window without giving it key focus.
+        // Make the actual visible AppKit window key before sending native input.
+        cx.update(|cx|web.update(cx,|view,_| {
+            if let Some(window)=view.raw().webview().window() {
+                window.makeKeyAndOrderFront(None);
+            }
+        }));
+        cx.background_executor().timer(Duration::from_millis(350)).await;
 
         cx.update(|cx|web.update(cx,|v,_|wk_input::click_at(v,80.0,50.0)))
             .map_err(|e|format!("native AppKit pointer was rejected: {e}"))?;
@@ -102,6 +110,7 @@ document.getElementById('trusted').addEventListener('click',(e)=>{
                 cx.new(|_|Scene{web})
             }).expect("native GPUI test window");
             let web=web_slot.unwrap();
+            cx.activate(true);
             cx.spawn(async move |cx|{
                 let outcome=check(web,window,cx).await;
                 match outcome {
