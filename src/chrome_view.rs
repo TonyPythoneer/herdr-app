@@ -32,6 +32,13 @@ impl ChromeView {
         self.session.clone()
     }
 
+    /// Return the actual launch failure to the caller. A failed async
+    /// CDP startup must not be reported as "still starting" indefinitely.
+    /// This contains only browser startup diagnostics, never page content.
+    pub fn startup_error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
     pub fn new(pane_id: String, url: String, cx: &mut Context<Self>) -> Self {
         let open_url = url.clone();
         let loader = cx.spawn(async move |this, cx| {
@@ -89,7 +96,10 @@ impl ChromeView {
                         this.session = Some(session);
                         this.error = None;
                     }
-                    Err(error) => this.error = Some(error),
+                    Err(error) => {
+                        tracing::warn!("Chrome CDP pane {} failed to initialize: {error}", this.pane_id);
+                        this.error = Some(error);
+                    },
                 }
                 cx.notify();
             });
