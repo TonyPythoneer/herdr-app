@@ -41,6 +41,7 @@ document.querySelector('#danger').addEventListener('click',()=> {
 
 class Fixture(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
+        self.server.seen_requests.append(self.path)
         if self.path not in ("/", "/next"):
             self.send_error(404)
             return
@@ -113,7 +114,8 @@ def until_ready(exe, env, pane, *, seconds=70):
                                    {"max_nodes": 40}, seconds=18)
             if reply["result"].get("title") == "Packaged Browser E2E":
                 return reply
-            last = "unexpected title or page: {}".format(reply["result"].get("title"))
+            last = "unexpected page: title={!r}, url={!r}".format(
+                reply["result"].get("title"), reply["result"].get("url"))
         except (AssertionError, subprocess.TimeoutExpired) as error:
             last = str(error)
         time.sleep(0.6)
@@ -216,6 +218,7 @@ def run(app, core_bin, engine, approval_driver=None):
         assert subprocess.run([str(core_bin), "--version"], env=env,
                               capture_output=True, timeout=10).returncode == 0, "invalid official core"
         server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Fixture)
+        server.seen_requests = []
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         url = "http://127.0.0.1:{}/".format(server.server_port)
@@ -252,6 +255,17 @@ def run(app, core_bin, engine, approval_driver=None):
                     snap = until_ready(app, env, pane)
                     assert snap["result"]["url"].startswith(url), snap
                     print("PACKAGED_BROWSER_OPEN_VERIFIED: " + engine, flush=True)
+                    if engine == "chrome-cdp":
+                        # Validate normal pane navigation as well as target
+                        # creation; a green startup must not hide a broken
+                        # Page.navigate for subsequent real user actions.
+                        next_url = url + "next"
+                        action(app, env, "browser.navigate",
+                               {"pane": pane, "url": next_url})
+                        navigated = until_ready(app, env, pane, seconds=30)
+                        assert navigated["result"].get("url", "").startswith(next_url), navigated
+                        print("PACKAGED_CHROME_NAVIGATE_VERIFIED: real pane navigated to /next",
+                              flush=True)
 
                     query = browser_action(app, env, "browser.query", pane,
                                            {"target": {"css": "#safe"}})
@@ -303,6 +317,8 @@ def run(app, core_bin, engine, approval_driver=None):
                         child.wait(timeout=5)
         except Exception:
             print("PACKAGED_BROWSER_E2E_FAILED: recent app diagnostics:", file=sys.stderr)
+            print("FIXTURE_HTTP_REQUESTS: {}".format(server.seen_requests[-40:]),
+                  file=sys.stderr)
             if log.exists():
                 print(log.read_text(errors="replace")[-6000:], file=sys.stderr)
             raise
