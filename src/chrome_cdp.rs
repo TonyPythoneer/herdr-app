@@ -508,6 +508,13 @@ mod tests {
             .expect("Chrome DOM snapshot");
         assert_eq!(snapshot["title"], "Herdr fixture");
         assert!(snapshot["elements"].as_array().is_some_and(|v| !v.is_empty()));
+        let serialized=snapshot.to_string();
+        for secret in ["481902","4111111111111111","Secret1"] {
+            assert!(!serialized.contains(secret),"Chrome snapshot leaked a sensitive fixture value");
+        }
+        assert!(snapshot["elements"].as_array().unwrap().iter()
+            .any(|entry| entry["value"]=="[REDACTED]"),
+            "snapshot must redacted sensitive inputs instead of bypassing inspect's serializer");
         let error = crate::browser_api::run(&pane, "browser.eval",
             &json!({"expression":"document.title"}), false, &cancelled)
             .expect_err("arbitrary JavaScript must require native user approval");
