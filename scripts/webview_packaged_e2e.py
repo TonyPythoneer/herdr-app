@@ -198,7 +198,7 @@ def run(app, core_bin, engine, approval_driver=None):
     version = subprocess.run([str(app), "--version"], text=True,
                              capture_output=True, timeout=10, check=True).stdout.strip()
     assert "-webview." in version, version
-    with tempfile.TemporaryDirectory(prefix="herdr-packaged-browser-e2e-") as root:
+    with tempfile.TemporaryDirectory(prefix="hv-e2e-", dir="/tmp") as root:
         tmp = Path(root)
         home = tmp / "home"
         config = tmp / "herdr-home"
