@@ -105,7 +105,10 @@ pub struct Client {
     // Screencast ACK writes must never happen inside the pipe reader:
     // Chrome can block writing a large PNG while waiting for the next ACK.
     // Writing an ACK synchronously from its reader creates a pipe deadlock.
-    frame_acks: SyncSender<(String, i64)>,
+    // ACKs are tiny and Chrome throttles frames on them, so this queue must
+    // never drop one (a dropped ACK stalls the stream) and never block the
+    // reader; an unbounded channel gives both.
+    frame_acks: Sender<(String, i64)>,
 }
 
 impl Client {
@@ -153,7 +156,7 @@ impl Client {
         };
         let writer = unsafe { File::from_raw_fd(cmd_write) };
         let reader = unsafe { File::from_raw_fd(out_read) };
-        let (frame_acks, ack_rx) = mpsc::sync_channel::<(String, i64)>(32);
+        let (frame_acks, ack_rx) = mpsc::channel::<(String, i64)>();
         let client = Arc::new(Self {
             child: Mutex::new(child),
             writer: Mutex::new(writer),
@@ -237,8 +240,7 @@ impl Client {
         if let Some(frame_id) = params.get("sessionId").and_then(Value::as_i64) {
             // Never block the only CDP reader on a write into Chrome's pipe.
             // Even discarded frames need ACKs to keep the screencast moving.
-            // Chrome throttles frames by ACK; 32 slots bound transient traffic.
-            let _ = self.frame_acks.try_send((session.to_owned(), frame_id));
+            let _ = self.frame_acks.send((session.to_owned(), frame_id));
         }
         let Some(data) = params.get("data").and_then(Value::as_str) else { return };
         if data.len() > MAX_FRAME_BASE64 { return }
@@ -345,13 +347,15 @@ impl Drop for Client {
 fn read_messages(mut reader: File, client: Weak<Client>) {
     let mut chunk = [0u8; 32768];
     let mut buffer = Vec::<u8>::new();
-    loop {
+    'read: loop {
         let Ok(read) = reader.read(&mut chunk) else { break };
         if read == 0 { break }
         for byte in &chunk[..read] {
             if *byte != 0 {
                 buffer.push(*byte);
-                if buffer.len() > MAX_MESSAGE { return }
+                // Fall through to the disconnect path below so in-flight
+                // requests fail immediately instead of timing out one by one.
+                if buffer.len() > MAX_MESSAGE { break 'read }
                 continue;
             }
             if let Ok(value) = serde_json::from_slice(&buffer)
