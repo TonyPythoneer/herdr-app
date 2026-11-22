@@ -137,7 +137,10 @@ document.getElementById('trusted').addEventListener('click',(e)=>{
                                     }
                                     cx.background_executor().timer(Duration::from_millis(100)).await;
                                 }
-                                return Err(format!("native WebKit wheel did not scroll the actual page with isTrusted=true: {observed}"));
+                                let diagnostic=evaluate(&web,
+                                    "JSON.stringify({scrollY:window.scrollY,trusted:window.__wheelTrusted,scrollHeight:document.documentElement.scrollHeight,innerHeight:window.innerHeight})",cx)
+                                    .await.unwrap_or_else(|err|format!("diagnostic unavailable: {err}"));
+                                return Err(format!("native WebKit wheel did not scroll the actual page with isTrusted=true: {observed}; fixture diagnostics={diagnostic}"));
                             }
                             cx.background_executor().timer(Duration::from_millis(100)).await;
                         }
