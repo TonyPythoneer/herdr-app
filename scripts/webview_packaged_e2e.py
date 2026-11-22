@@ -6,9 +6,12 @@ its real control socket and MCP stdio adapter, and runs a loopback-only fixture.
 No production website, private Chrome profile or person's Herdr home is touched.
 """
 import argparse
+import contextlib
+import errno
 import http.server
 import json
 import os
+import shutil
 from pathlib import Path
 import stat
 import subprocess
@@ -217,13 +220,48 @@ def test_native_gpui_approval(exe, env, pane, pid, driver):
     print("PACKAGED_GPUI_APPROVAL_E2E_VERIFIED: real native approve and deny with DOM postconditions", flush=True)
 
 
+@contextlib.contextmanager
+def isolated_test_home():
+    """Bounded cleanup for Chrome's asynchronous profile helper writes.
+
+    Chrome renderer helpers can briefly outlive the packaged app process and
+    recreate files while shutil.rmtree traverses the disposable test profile.
+    Never ignore cleanup errors, and never touch a real user's Chrome profile.
+    """
+    root = Path(tempfile.mkdtemp(prefix="hv-e2e-", dir="/tmp"))
+    try:
+        yield root
+    finally:
+        deadline = time.monotonic() + 15
+        retries = 0
+        while True:
+            try:
+                shutil.rmtree(root)
+                break
+            except FileNotFoundError:
+                if not root.exists():
+                    break
+            except OSError as error:
+                if error.errno not in (errno.ENOTEMPTY, errno.EBUSY):
+                    raise
+            if time.monotonic() >= deadline:
+                raise AssertionError(
+                    "Chrome helper processes continued writing to the isolated "
+                    "test profile after app shutdown: {}".format(root))
+            retries += 1
+            time.sleep(0.15)
+        if retries:
+            print("PACKAGED_PROFILE_CLEANUP_VERIFIED: {} bounded retries".format(retries),
+                  flush=True)
+
+
 def run(app, core_bin, engine, approval_driver=None):
     assert app.name == "Herdr", "expected the packaged Contents/MacOS/Herdr binary"
     assert app.is_file(), "packaged application executable missing"
     version = subprocess.run([str(app), "--version"], text=True,
                              capture_output=True, timeout=10, check=True).stdout.strip()
     assert "-webview." in version, version
-    with tempfile.TemporaryDirectory(prefix="hv-e2e-", dir="/tmp") as root:
+    with isolated_test_home() as root:
         tmp = Path(root)
         home = tmp / "home"
         config = tmp / "herdr-home"
@@ -338,7 +376,7 @@ def run(app, core_bin, engine, approval_driver=None):
                         test_native_gpui_approval(app, env, pane, child.pid, approval_driver)
                     closed = action(app, env, "tab.close",
                                     {"id": tab["tab"], "confirmed": True})
-                    print("PACKAGED_BROWSER_E2E_VERIFIED: {} complete".format(engine), flush=True)
+                    # Emit success only after child shutdown and profile cleanup succeed.
                 finally:
                     child.terminate()
                     try:
@@ -355,6 +393,7 @@ def run(app, core_bin, engine, approval_driver=None):
             raise
         finally:
             server.shutdown()
+    print("PACKAGED_BROWSER_E2E_VERIFIED: {} complete".format(engine), flush=True)
 
 
 if __name__ == "__main__":
