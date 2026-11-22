@@ -392,36 +392,9 @@ struct Watched {
 }
 
 
-#[cfg(target_os = "macos")]
-#[derive(Clone)]
-enum BrowserJobStatus {
-    Running,
-    ApprovalRequired(String),
-    Finished(Result<Value, String>),
-}
+#[cfg(target_os="macos")]
+use herdr_webview_adapter::browser_job::{BrowserJob, BrowserJobStatus, new_browser_request_id};
 
-#[cfg(target_os = "macos")]
-struct BrowserJob {
-    pane: String,
-    action: String,
-    args: Value,
-    /// None: native WKWebView callback backend. Some: Chrome CDP backend.
-    session: Option<Arc<crate::chrome_cdp::Session>>,
-    cancelled: Arc<std::sync::atomic::AtomicBool>,
-    status: BrowserJobStatus,
-}
-
-/// Random, unguessable, per-request identifier. A numeric sequence would let
-/// another local Agent inspect or cancel an unrelated pane's browser result.
-#[cfg(target_os = "macos")]
-fn new_browser_request_id() -> Result<String, String> {
-    use std::io::Read as _;
-    let mut bytes = [0u8; 16];
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut file| file.read_exact(&mut bytes))
-        .map_err(|error| format!("cannot generate browser request ID: {error}"))?;
-    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
-}
 
 pub struct AppWindow {
     core: Arc<Core>,

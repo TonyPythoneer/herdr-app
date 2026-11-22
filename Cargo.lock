@@ -4207,7 +4207,7 @@ dependencies = [
 [[package]]
 name = "herdr-webview-adapter"
 version = "0.1.0"
-source = "git+https://github.com/TonyPythoneer/herdr-webview-adapter?rev=6d2b5a8d555d8a276ac60e7eb51b26e8e94de4c9#6d2b5a8d555d8a276ac60e7eb51b26e8e94de4c9"
+source = "git+https://github.com/TonyPythoneer/herdr-webview-adapter?rev=38f57321e8f913078333f4ef7cc279ac9982ae5c#38f57321e8f913078333f4ef7cc279ac9982ae5c"
 dependencies = [
  "base64",
  "block2 0.6.2",
