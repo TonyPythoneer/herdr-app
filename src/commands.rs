@@ -59,7 +59,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("browser.fill", &[req("pane"), req("target"), req("value"), opt("timeout_ms")], "Focus, select and enter text; sensitive fields require native approval."),
     cmd("browser.type", &[req("pane"), req("target"), req("text"), opt("timeout_ms")], "Focus and type without clearing an editable field."),
     cmd("browser.press", &[req("pane"), req("key"), opt("target")], "Dispatch a browser key; a key that could submit a form requires approval."),
-    cmd("browser.scroll", &[req("pane"), req("delta_y"), opt("delta_x"), opt("x"), opt("y")], "Scroll the selected Chrome CDP page; WKWebView scroll is not yet available."),
+    cmd("browser.scroll", &[req("pane"), req("delta_y"), opt("delta_x"), opt("x"), opt("y")], "Scroll the selected browser pane using native Chrome CDP or WKWebView wheel input."),
     cmd("browser.wait", &[req("pane"), req("condition"), opt("timeout_ms")], "Wait for a page URL, visible selector or text condition with timeout."),
     cmd("browser.eval", &[req("pane"), req("expression"), opt("timeout_ms")], "Evaluate page JavaScript only after native user approval."),
     cmd("browser.screenshot", &[req("pane"), opt("scope")], "Capture a native-backend PNG screenshot to a private local path."),
