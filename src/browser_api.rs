@@ -57,7 +57,7 @@ const sensitive=e=>{
   const autocomplete=String(e.getAttribute('autocomplete')||'').toLowerCase();
   const identity=[e.id,e.getAttribute('name'),e.getAttribute('aria-label')].filter(Boolean).join(' ');
   return kind==='password'||kind==='hidden'
-    ||/(?:^|\\s)(?:current-password|new-password|one-time-code|cc-[\\w-]+)(?:\\s|$)/i.test(autocomplete)
+    ||/(?:^|\s)(?:current-password|new-password|one-time-code|cc-[\w-]+)(?:\s|$)/i.test(autocomplete)
     ||/(?:password|passwd|passcode|pin|otp|totp|2fa|cvv|cvc|credit.?card|card.?number|secret|access.?token|api.?key|security.?code)/i.test(identity);
 };
 const summary=e=>{
