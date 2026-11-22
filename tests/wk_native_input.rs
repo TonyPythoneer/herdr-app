@@ -25,7 +25,12 @@ mod mac {
         let url=format!("http://{}/",listener.local_addr().unwrap());
         let handle=std::thread::spawn(move ||{
             let (mut conn,_) = listener.accept().unwrap();
-            conn.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            // On some macOS CI runners setsockopt(SO_RCVTIMEO) returns EINVAL
+            // for a WebKit-networking accepted socket. The fixture is already
+            // bounded by its caller's E2E timeout; this is not a test failure.
+            if let Err(error) = conn.set_read_timeout(Some(Duration::from_secs(5))) {
+                eprintln!("WK fixture socket read timeout unavailable: {error}");
+            }
             let mut buf=[0u8;4096];
             let n=conn.read(&mut buf).unwrap_or(0);
             assert!(String::from_utf8_lossy(&buf[..n]).starts_with("GET / HTTP/1.1"));
