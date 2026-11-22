@@ -5031,6 +5031,66 @@ impl AppWindow {
             }).detach();
             return;
         }
+        if action == "browser.wait" {
+            let Some(view) = self.browser_views.get(&pane).cloned() else {
+                return self.browser_finish_job(&id, approved,
+                    Err("BROWSER_NOT_READY: WKWebView pane is closed".into()), cx);
+            };
+            let script = match crate::wk_agent::script(&action, &args, approved) {
+                Ok(script) => script,
+                Err(error) => return self.browser_finish_job(&id, approved, Err(error), cx),
+            };
+            let timeout = std::time::Duration::from_millis(
+                args.get("timeout_ms").and_then(Value::as_u64).unwrap_or(5000).min(30000));
+            cx.spawn(async move |this, cx| {
+                let started = std::time::Instant::now();
+                loop {
+                    if cancel.load(std::sync::atomic::Ordering::Acquire) {
+                        let _ = this.update(cx, |this, cx|
+                            this.browser_finish_job(&id, approved, Err("CANCELLED".into()), cx));
+                        break;
+                    }
+                    let (tx, rx) = std::sync::mpsc::channel::<String>();
+                    let launched = cx.update(|cx| view.update(cx, |view, _| {
+                        view.raw().evaluate_script_with_callback(&script, move |value| {
+                            let _ = tx.send(value);
+                        })
+                    }));
+                    let result = match launched {
+                        Ok(()) => {
+                            cx.background_executor().spawn(async move {
+                                rx.recv_timeout(std::time::Duration::from_secs(2))
+                                    .map_err(|e| format!("WK_CALLBACK_TIMEOUT: {e}"))
+                                    .and_then(|json| crate::wk_agent::parse_callback(&json))
+                            }).await
+                        }
+                        Err(error) => Err(format!("WK_EVALUATION_FAILED: {error}")),
+                    };
+                    match result {
+                        Ok(result) if result["matched"] == true => {
+                            let _ = this.update(cx, |this, cx|
+                                this.browser_finish_job(&id, approved, Ok(result), cx));
+                            break;
+                        }
+                        Ok(_) if started.elapsed() >= timeout => {
+                            let _ = this.update(cx, |this, cx|
+                                this.browser_finish_job(&id, approved,
+                                    Err("TIMEOUT: WKWebView wait condition not satisfied".into()), cx));
+                            break;
+                        }
+                        Ok(_) => {
+                            cx.background_executor().timer(std::time::Duration::from_millis(100)).await;
+                        }
+                        Err(error) => {
+                            let _ = this.update(cx, |this, cx|
+                                this.browser_finish_job(&id, approved, Err(error), cx));
+                            break;
+                        }
+                    }
+                }
+            }).detach();
+            return;
+        }
         let script = match crate::wk_agent::script(&action, &args, approved) {
             Ok(script) => script,
             Err(error) => return self.browser_finish_job(&id, approved, Err(error), cx),
@@ -5060,7 +5120,24 @@ impl AppWindow {
                 }
                 crate::wk_agent::parse_callback(&payload)
             }).await;
-            let _ = this.update(cx, |this, cx| this.browser_finish_job(&id, approved, result, cx));
+            let _ = this.update(cx, |this, cx| {
+                let result: Result<Value, String> =
+                    if matches!(action.as_str(), "browser.click" | "browser.click_at") {
+                        result.and_then(|coordinates| {
+                            let x=coordinates["x"].as_f64().ok_or("INVALID_ARGUMENT: missing native click X")?;
+                            let y=coordinates["y"].as_f64().ok_or("INVALID_ARGUMENT: missing native click Y")?;
+                            if cancel.load(std::sync::atomic::Ordering::Acquire) {
+                                return Err("CANCELLED".into());
+                            }
+                            let view=this.browser_views.get(&pane)
+                                .ok_or("BROWSER_NOT_READY: WKWebView was closed before click")?;
+                            view.update(cx, |view, _| crate::wk_input::click_at(view, x, y))?;
+                            Ok(json!({"native_event_dispatched":true,"postcondition_verified":false,
+                                "message":"Re-observe the page to verify the intended effect"}))
+                        })
+                    } else { result };
+                this.browser_finish_job(&id, approved, result, cx);
+            });
         }).detach();
     }
 

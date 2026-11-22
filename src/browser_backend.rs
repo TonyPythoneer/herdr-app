@@ -106,8 +106,8 @@ pub fn capabilities() -> Value {
                 "implemented": available.wkwebview,
                 "actions": ["open", "navigate", "back", "forward", "reload"],
                 "agent_automation": available.wkwebview,
-                "agent_actions": ["snapshot", "query", "inspect", "eval", "screenshot"],
-                "notes": "WKWebView screenshot uses native WebKit pixels; true mouse and keyboard still pending"
+                "agent_actions": ["snapshot", "query", "inspect", "click", "click_at", "wait", "eval", "screenshot"],
+                "notes": "WKWebView click dispatches AppKit-native events; keyboard and scrolling still pending"
             },
             "chrome-cdp": {
                 "available": available.chrome_cdp,
