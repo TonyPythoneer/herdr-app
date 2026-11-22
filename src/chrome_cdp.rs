@@ -267,6 +267,13 @@ impl Client {
         let pane = Session { client: self.clone(), target, session, frames: Mutex::new(rx) };
         pane.command("Page.enable", json!({}))?;
         pane.command("Runtime.enable", json!({}))?;
+        // Chrome 144+ may leave a newly attached target waiting for the
+        // debugger even after domain enable succeeds. A suspended target can
+        // respond to enable/evaluate but never navigate or fetch page content.
+        // Resume before any navigation, screencast or network-dependent work.
+        // Use ordered CDP pipe delivery without waiting on the paused renderer:
+        // runIfWaitingForDebugger is a no-op for already-running targets.
+        pane.post("Runtime.runIfWaitingForDebugger", json!({}))?;
         pane.resize(1024, 768)?;
         // Chrome may create an attached target while its initial navigation is
         // still pending. Starting Page.startScreencast before the renderer has
