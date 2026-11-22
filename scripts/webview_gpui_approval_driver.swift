@@ -72,7 +72,7 @@ let target = NSRunningApplication(processIdentifier: pid)
 let activated = target?.activate(options: [.activateIgnoringOtherApps]) ?? false
 usleep(350_000)
 let frontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier
-print("GPUI_NATIVE_INPUT_DIAGNOSTIC: accessibility_trusted=\(trusted) activated=\(activated) frontmost=\(frontmost ?? -1) target=\(pid)", flush: true)
+print("GPUI_NATIVE_INPUT_DIAGNOSTIC: accessibility_trusted=\(trusted) activated=\(activated) frontmost=\(frontmost ?? -1) target=\(pid)")
 
 // Prefer an actual accessibility button. The custom GPUI div's AXPress action,
 // when exposed, exercises exactly the live on_click native GPUI callback.
@@ -124,7 +124,7 @@ let centerY = by.doubleValue + bh.doubleValue / 2
 // Card is 520px wide, centered; two buttons are left aligned below the text.
 let point = CGPoint(x: centerX + (requested == "Approve once" ? -102 : -214),
                     y: centerY + 65)
-print("GPUI_NATIVE_INPUT_DIAGNOSTIC: window_origin=(\(bx),\(by)) size=(\(bw),\(bh)) click=(\(point.x),\(point.y)) label=\(requested)", flush: true)
+print("GPUI_NATIVE_INPUT_DIAGNOSTIC: window_origin=(\(bx),\(by)) size=(\(bw),\(bh)) click=(\(point.x),\(point.y)) label=\(requested)")
 guard click(at: point) else {
     fputs("Failed to send a real Quartz pointer event\n", stderr)
     exit(1)
