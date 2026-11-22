@@ -50,18 +50,27 @@ func locate(_ root: AXUIElement, _ label: String) -> AXUIElement? {
 }
 
 func click(at point: CGPoint) -> Bool {
-    guard let down = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown,
+    // GPUI receives regular macOS HID events in its NSWindow event loop.
+    // CGEvent.postToPid can enqueue a Quartz event without passing through
+    // the active AppKit window's normal mouse routing; the previous harness
+    // claimed a successful click while the real approval stayed pending.
+    // The caller first verifies that the target app is the actual foreground
+    // process, and AX/TCC authorization is already granted.
+    let source = CGEventSource(stateID: .hidSystemState)
+    guard let moved = CGEvent(mouseEventSource: source, mouseType: .mouseMoved,
+                              mouseCursorPosition: point, mouseButton: .left),
+          let down = CGEvent(mouseEventSource: source, mouseType: .leftMouseDown,
                              mouseCursorPosition: point, mouseButton: .left),
-          let up = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp,
+          let up = CGEvent(mouseEventSource: source, mouseType: .leftMouseUp,
                            mouseCursorPosition: point, mouseButton: .left) else {
         return false
     }
-    // Sending to the target process avoids routing the click to an unrelated
-    // CI runner window that momentarily stole foreground focus. This still
-    // passes through macOS native UI event routing and requires TCC approval.
-    down.postToPid(pid)
-    usleep(90_000)
-    up.postToPid(pid)
+    moved.post(tap: .cghidEventTap)
+    usleep(140_000)
+    down.post(tap: .cghidEventTap)
+    usleep(140_000)
+    up.post(tap: .cghidEventTap)
+    usleep(140_000)
     return true
 }
 
@@ -69,10 +78,14 @@ func click(at point: CGPoint) -> Bool {
 // Bring the exact packaged Herdr app to the front before sending OS events.
 let trusted = AXIsProcessTrusted()
 let target = NSRunningApplication(processIdentifier: pid)
-let activated = target?.activate(options: [.activateIgnoringOtherApps]) ?? false
+let activated = target?.activate(options: []) ?? false
 usleep(350_000)
 let frontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier
 print("GPUI_NATIVE_INPUT_DIAGNOSTIC: accessibility_trusted=\(trusted) activated=\(activated) frontmost=\(frontmost ?? -1) target=\(pid)")
+guard trusted, activated, frontmost == pid else {
+    fputs("No trusted foreground session for native GPUI input; refusing to click another app\n", stderr)
+    exit(1)
+}
 
 // Prefer an actual accessibility button. The custom GPUI div's AXPress action,
 // when exposed, exercises exactly the live on_click native GPUI callback.
@@ -129,4 +142,4 @@ guard click(at: point) else {
     fputs("Failed to send a real Quartz pointer event\n", stderr)
     exit(1)
 }
-print("GPUI_NATIVE_APPROVAL_INPUT: Quartz click \(requested) in packaged app PID \(pid)")
+print("GPUI_NATIVE_APPROVAL_INPUT: Quartz HID click \(requested) in packaged app PID \(pid)")
