@@ -189,7 +189,7 @@ No arguments.
 
 ## `browser.snapshot`
 
-Read a bounded semantic DOM snapshot in a Chrome pane.
+Read a bounded semantic DOM snapshot from the selected browser backend.
 
 | Argument | Required |
 |---|---|
@@ -273,7 +273,7 @@ Dispatch a browser key; a key that could submit a form requires approval.
 
 ## `browser.scroll`
 
-Scroll the Chrome page through its CDP input channel.
+Scroll the selected Chrome CDP page; WKWebView scroll is not yet available.
 
 | Argument | Required |
 |---|---|
@@ -305,7 +305,7 @@ Evaluate page JavaScript only after native user approval.
 
 ## `browser.screenshot`
 
-Capture a PNG screenshot from Chrome to a private local path.
+Capture a native-backend PNG screenshot to a private local path.
 
 | Argument | Required |
 |---|---|
