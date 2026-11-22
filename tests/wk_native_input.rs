@@ -9,7 +9,7 @@ mod wk_input;
 mod mac {
     use gpui::{prelude::*,*};
     use raw_window_handle::HasWindowHandle;
-    use std::{io::{Read,Write}, net::TcpListener, sync::mpsc, time::Duration};
+    use std::{io::{Read,Write}, net::TcpListener, sync::mpsc, time::{Duration,Instant}};
     use super::wk_input;
     use wry::WebViewExtMacOS;
 
@@ -24,16 +24,52 @@ mod mac {
         let listener=TcpListener::bind("127.0.0.1:0").unwrap();
         let url=format!("http://{}/",listener.local_addr().unwrap());
         let handle=std::thread::spawn(move ||{
-            let (mut conn,_) = listener.accept().unwrap();
-            // On some macOS CI runners setsockopt(SO_RCVTIMEO) returns EINVAL
-            // for a WebKit-networking accepted socket. The fixture is already
-            // bounded by its caller's E2E timeout; this is not a test failure.
-            if let Err(error) = conn.set_read_timeout(Some(Duration::from_secs(5))) {
-                eprintln!("WK fixture socket read timeout unavailable: {error}");
-            }
-            let mut buf=[0u8;4096];
-            let n=conn.read(&mut buf).unwrap_or(0);
-            assert!(String::from_utf8_lossy(&buf[..n]).starts_with("GET / HTTP/1.1"));
+            // WebKit can preconnect, request the favicon first, or split an
+            // HTTP request line across multiple reads. A single read() is
+            // never a reliable request parser. Keep the fixture bounded and
+            // serve the main document only after an actual GET / request.
+            listener.set_nonblocking(true).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut conn = loop {
+                assert!(Instant::now() < deadline, "WK fixture never received GET /");
+                let (mut conn, _) = match listener.accept() {
+                    Ok(pair) => pair,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                        continue;
+                    }
+                    Err(error) => panic!("WK fixture accept failed: {error}"),
+                };
+                conn.set_nonblocking(true).expect("WK fixture must not block on preconnect");
+                let mut request = Vec::new();
+                let request_deadline = Instant::now() + Duration::from_secs(2);
+                while request.len() < 4096 && Instant::now() < request_deadline {
+                    let mut chunk = [0u8; 512];
+                    match conn.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            request.extend_from_slice(&chunk[..n]);
+                            if request.contains(&b'\n') { break; }
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                        Err(error) => {
+                            eprintln!("WK fixture request read failed: {error}");
+                            break;
+                        }
+                    }
+                }
+                let first_line = String::from_utf8_lossy(&request);
+                let first_line = first_line.lines().next().unwrap_or("").trim_end_matches('\r');
+                if first_line == "GET / HTTP/1.1" {
+                    conn.set_nonblocking(false).unwrap();
+                    break conn;
+                }
+                eprintln!("WK fixture ignored auxiliary/disconnected request: {first_line:?}");
+                let _ = conn.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            };
             let html=r#"<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1">
 <body style="margin:0;background:white;height:2200px">
 <button id="trusted" style="position:absolute;left:20px;top:20px;width:120px;height:60px">Tap</button>
