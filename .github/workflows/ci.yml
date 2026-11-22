@@ -94,10 +94,10 @@ jobs:
       - name: Diagnose macOS Cargo.lock consistency
         if: runner.os == 'macOS'
         run: |
-          if cargo metadata --locked --no-deps --format-version=1 >/dev/null; then
+          if cargo metadata --locked --format-version=1 >/dev/null; then
             exit 0
           fi
-          cargo metadata --offline --no-deps --format-version=1 >/dev/null || true
+          cargo metadata --offline --format-version=1 >/dev/null || true
           git diff -- Cargo.lock
           echo 'Cargo.lock must be committed in sync with Cargo.toml' >&2
           exit 1
