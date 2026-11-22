@@ -5246,17 +5246,25 @@ impl AppWindow {
         cx.notify();
     }
 
+    /// Panes whose WKWebView must stay hidden while a GPUI approval modal is
+    /// up: the native child view would otherwise cover the modal and eat the
+    /// pointer. A job without a CDP session is a WKWebView job.
+    #[cfg(target_os = "macos")]
+    fn wk_panes_awaiting_approval(&self) -> HashSet<String> {
+        self.browser_jobs.values()
+            .filter(|job| job.session.is_none()
+                && matches!(job.status, BrowserJobStatus::ApprovalRequired(_)))
+            .map(|job| job.pane.clone())
+            .collect()
+    }
+
     /// Native WKWebView is an AppKit child NSView painted above GPUI content.
     /// Temporarily hide the child during a GPUI approval modal, otherwise the
     /// modal can look visible yet be impossible to click (or be covered).
     /// Do not show a pane belonging to an inactive tab when the modal ends.
     #[cfg(target_os = "macos")]
     fn sync_wk_approval_visibility(&mut self, cx: &mut Context<Self>) {
-        let blocked: HashSet<&str> = self.browser_jobs.values()
-            .filter(|job| job.session.is_none()
-                && matches!(job.status, BrowserJobStatus::ApprovalRequired(_)))
-            .map(|job| job.pane.as_str())
-            .collect();
+        let blocked = self.wk_panes_awaiting_approval();
         let active: HashSet<String> = if self.shows_tab() {
             self.model.active_tab().map(|tab| tab.shown().visible_blocks()
                 .into_iter().filter(|node|
@@ -5266,7 +5274,7 @@ impl AppWindow {
             HashSet::new()
         };
         for (pane, view) in &self.browser_views {
-            let show = active.contains(pane) && !blocked.contains(pane.as_str());
+            let show = active.contains(pane) && !blocked.contains(pane);
             view.update(cx, |view, _| {
                 if show && !view.visible() { view.show(); }
                 if !show && view.visible() { view.hide(); }
@@ -5366,10 +5374,7 @@ impl AppWindow {
             keep
         });
         self.browser_errors.retain(|id, _| owned.contains_key(id));
-        let blocked_wk: HashSet<String> = self.browser_jobs.values()
-            .filter(|job| job.session.is_none()
-                && matches!(job.status, BrowserJobStatus::ApprovalRequired(_)))
-            .map(|job| job.pane.clone()).collect();
+        let blocked_wk = self.wk_panes_awaiting_approval();
         for (id, desired) in owned {
             let pane_visible = visible.contains(&id);
             let (engine, url) = match desired {
