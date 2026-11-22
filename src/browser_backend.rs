@@ -106,9 +106,9 @@ pub fn capabilities() -> Value {
                 "implemented": available.wkwebview,
                 "actions": ["open", "navigate", "back", "forward", "reload"],
                 "agent_automation": available.wkwebview,
-                "agent_actions": ["snapshot", "query", "inspect", "click", "click_at", "fill", "type", "press", "wait", "eval", "screenshot"],
-                "limits": {"text_input": "1..128 ASCII letters, digits and spaces", "scroll": "not yet implemented", "unicode_ime": "not yet implemented"},
-                "notes": "WKWebView uses AppKit native click/key/text events; no universal parity until real shipped-app E2E gates pass"
+                "agent_actions": ["snapshot", "query", "inspect", "click", "click_at", "fill", "type", "press", "scroll", "wait", "eval", "screenshot"],
+                "limits": {"text_input": "1..128 ASCII letters, digits and spaces", "scroll": "bounded native CoreGraphics pixel wheel; visible focused pane only", "unicode_ime": "not yet implemented"},
+                "notes": "WKWebView uses native click/key/text/wheel events; no universal parity until real shipped-app E2E gates pass"
             },
             "chrome-cdp": {
                 "available": available.chrome_cdp,
@@ -168,8 +168,8 @@ mod tests {
         for name in ["snapshot", "query", "inspect", "click", "click_at", "fill", "type", "press", "wait", "eval", "screenshot"] {
             assert!(actions.iter().any(|item| item.as_str() == Some(name)), "missing WK native action: {name}");
         }
-        assert!(!actions.iter().any(|item| item.as_str() == Some("scroll")),
-            "never advertise WK scroll until it is genuinely implemented and tested");
+        assert!(actions.iter().any(|item| item.as_str() == Some("scroll")),
+            "WK native wheel must remain exposed after its shipped input integration");
         assert_eq!(caps["engines"]["wkwebview"]["limits"]["unicode_ime"], "not yet implemented");
     }
 
