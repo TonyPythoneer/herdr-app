@@ -22,8 +22,8 @@ PAGE = """<!doctype html><html><head><title>Packaged Browser E2E</title>
 <meta name="viewport" content="width=device-width,initial-scale=1"></head>
 <body style="height:2500px;margin:0;padding:24px">
 <h1>Packaged Browser E2E</h1>
-<button id="safe">Next</button>
-<button id="danger">Delete</button>
+<button id="safe" type="button">Next</button>
+<button id="danger" type="button">Delete</button>
 <input id="field" aria-label="Test Field" type="text">
 <p id="status">untouched</p>
 <script>
