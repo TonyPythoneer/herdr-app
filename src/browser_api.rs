@@ -2,7 +2,7 @@
 //! host's verified Herdr-pane dispatcher, never from a web page script.
 use crate::chrome_cdp::Session;
 use serde_json::{Value, json};
-use std::{sync::{Arc, atomic::{AtomicBool,AtomicU64,Ordering}},time::{Duration,Instant},fs,io::Write,os::unix::fs::{PermissionsExt,OpenOptionsExt}};
+use std::{sync::{Arc, atomic::{AtomicBool,AtomicU64,Ordering}},time::{Duration,Instant},fs,io::Write,path::Path,os::unix::fs::{PermissionsExt,OpenOptionsExt}};
 static SCREENSHOT_SEQ: AtomicU64 = AtomicU64::new(1);
 const MAX_TEXT: usize = 65536;
 
@@ -52,12 +52,20 @@ const path=e=>{
   }
   return p.join(' > ');
 };
+const sensitive=e=>{
+  const kind=String(e.getAttribute('type')||'').toLowerCase();
+  const autocomplete=String(e.getAttribute('autocomplete')||'').toLowerCase();
+  const identity=[e.id,e.getAttribute('name'),e.getAttribute('aria-label')].filter(Boolean).join(' ');
+  return kind==='password'||kind==='hidden'
+    ||/(?:^|\\s)(?:current-password|new-password|one-time-code|cc-[\\w-]+)(?:\\s|$)/i.test(autocomplete)
+    ||/(?:password|passwd|passcode|pin|otp|totp|2fa|cvv|cvc|credit.?card|card.?number|secret|access.?token|api.?key|security.?code)/i.test(identity);
+};
 const summary=e=>{
   const b=e.getBoundingClientRect();
   return {ref:path(e),role:role(e),name:name(e),tag:e.tagName.toLowerCase(),text:simple(e.textContent),
     visible:visible(e),enabled:!e.disabled&&e.getAttribute('aria-disabled')!=='true',
     bounds:{x:b.x,y:b.y,width:b.width,height:b.height},
-    value:e.type==='password'?'[REDACTED]':
+    value:sensitive(e)?'[REDACTED]':
       (e.tagName==='INPUT'||e.tagName==='TEXTAREA'?simple(e.value):null)};
 };
 const equals=(a,b)=>value.exact===false?String(a).toLowerCase().includes(String(b).toLowerCase()):String(a)===String(b);
@@ -85,6 +93,18 @@ fn unique(session:&Session,loc:&Value,body:&str)->Result<Value,String>{
     let value=session.eval(&script)?;
     if let Some(error)=value["error"].as_str(){return Err(format!("{error}: {} matches",value["count"]))}
     Ok(value)
+}
+// Share the same no-symlink, owner-only storage policy as native WebKit.
+// A pre-existing browser-screenshots symlink must never redirect Agent PNGs
+// into another directory, even if that directory is writable.
+fn ensure_private_screenshot_dir(dir:&Path)->Result<(),String>{
+    fs::create_dir_all(dir).map_err(|e|format!("SCREENSHOT_WRITE_FAILED: {e}"))?;
+    let meta=fs::symlink_metadata(dir).map_err(|e|format!("SCREENSHOT_WRITE_FAILED: {e}"))?;
+    if !meta.is_dir() || meta.file_type().is_symlink(){
+        return Err("SCREENSHOT_WRITE_FAILED: screenshot directory must not be a symlink".into());
+    }
+    fs::set_permissions(dir,fs::Permissions::from_mode(0o700))
+        .map_err(|e|format!("SCREENSHOT_WRITE_FAILED: {e}"))
 }
 fn capped(value:Value)->Result<Value,String>{
     if serde_json::to_vec(&value).map_err(|e|e.to_string())?.len()>524288{
@@ -246,11 +266,11 @@ return {{matched:!!ok,url:location.href}};}})()"#,cond);
             let img=image::load_from_memory_with_format(&bytes,image::ImageFormat::Png)
                 .map_err(|e|format!("SCREENSHOT_INVALID: {e}"))?;
             let dir=crate::mods::app_dir().join("browser-screenshots");
-            fs::create_dir_all(&dir).map_err(|e|format!("SCREENSHOT_WRITE_FAILED: {e}"))?;
-            fs::set_permissions(&dir,fs::Permissions::from_mode(0o700)).map_err(|e|e.to_string())?;
+            ensure_private_screenshot_dir(&dir)?;
             let file=dir.join(format!("chrome-{}-{}.png",std::process::id(),SCREENSHOT_SEQ.fetch_add(1,Ordering::Relaxed)));
             let mut f=fs::OpenOptions::new().write(true).create_new(true).mode(0o600)
-                .open(&file).map_err(|e|e.to_string())?;
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(&file).map_err(|e|format!("SCREENSHOT_WRITE_FAILED: {e}"))?;
             f.write_all(&bytes).map_err(|e|e.to_string())?;
             json!({"path":file.to_string_lossy(),"width":img.width(),"height":img.height(),"format":"png"})
         }
@@ -274,6 +294,27 @@ mod tests {
         assert!(locator(&json!({"target":{"css":"button","text":"Search"}})).is_err());
         assert!(locator(&json!({"target":{"x":1,"y":2}})).is_err());
     }
+    #[test]
+    fn chrome_screenshot_directory_rejects_symlink_redirection(){
+        use std::os::unix::fs::symlink;
+        let parent=std::env::temp_dir().join(format!("herdr-chrome-png-security-{}",std::process::id()));
+        let _=fs::remove_dir_all(&parent);
+        fs::create_dir_all(&parent).unwrap();
+        let real=parent.join("real");
+        assert!(ensure_private_screenshot_dir(&real).is_ok());
+        assert_eq!(fs::metadata(&real).unwrap().permissions().mode()&0o777,0o700);
+        let alias=parent.join("browser-screenshots");
+        symlink(&real,&alias).unwrap();
+        assert!(ensure_private_screenshot_dir(&alias).unwrap_err().contains("symlink"));
+        fs::remove_dir_all(parent).unwrap();
+    }
+    #[test]
+    fn shared_dom_helper_redacts_passwords_otp_and_card_fields(){
+        for marker in ["current-password","one-time-code","cc-","api.?key","[REDACTED]"] {
+            assert!(DOM_HELPERS.contains(marker),"missing sensitive redaction rule: {marker}");
+        }
+    }
+
     #[test]
     fn browser_operation_output_must_be_bounded(){
         assert!(capped(json!({"data":"x".repeat(600000)})).is_err());
