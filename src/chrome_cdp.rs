@@ -130,6 +130,15 @@ impl Client {
             .arg("--no-first-run")
             .arg("--no-default-browser-check")
             .arg("--disable-background-networking")
+            // Chrome 158+ initialises the "Chrome Safe Storage" keychain item
+            // on the first real navigation and blocks forever when HOME is
+            // fresh (CI, disposable homes): the page stays on about:blank and
+            // Page.navigate stops answering. Every macOS automation stack
+            // (Playwright, Puppeteer, Selenium) passes --use-mock-keychain for
+            // exactly this. shortcut: cookies in this private agent-only
+            // profile are obfuscated with a fixed key instead of the login
+            // keychain, upgrade if the profile ever stores real credentials.
+            .arg("--use-mock-keychain")
             .arg("about:blank")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
