@@ -1,26 +1,7 @@
-//! Browser engine selection and persisted pane metadata.
-//!
-//! This is the first slice of BrowserHost. Engine selection is deliberately
-//! separate from a rendering implementation so that adding local Chrome CDP
-//! cannot silently reinterpret an existing WKWebView tab.
+//! Host-only backend discovery and capability advertisement.
+//! Pure engine selection and persistence policy come from the adapter crate.
 use serde_json::{Value, json};
-
-pub const API_VERSION: &str = "1.0";
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum BrowserEngine {
-    WkWebView,
-    ChromeCdp,
-}
-
-impl BrowserEngine {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::WkWebView => "wkwebview",
-            Self::ChromeCdp => "chrome-cdp",
-        }
-    }
-}
+pub use herdr_webview_adapter::engine_policy::{API_VERSION, BrowserEngine, from_persisted, set_pane_url};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Availability {
@@ -41,47 +22,15 @@ impl Availability {
     }
 }
 
-/// Resolve a NEW tab's engine. An omitted/"auto" choice prefers a usable
-/// Chrome backend and otherwise chooses WKWebView. An explicit choice never
-/// falls back silently. "chrome_cdp" means the complete renderer/automation
-/// backend is usable, not merely that Google Chrome exists on disk.
+/// Preserve the host-facing API while delegating the decision to the package.
 pub fn resolve_new_tab(requested: Option<&str>, available: Availability) -> Result<BrowserEngine, String> {
-    match requested.unwrap_or("auto") {
-        "auto" => {
-            if available.chrome_cdp {
-                Ok(BrowserEngine::ChromeCdp)
-            } else if available.wkwebview {
-                Ok(BrowserEngine::WkWebView)
-            } else {
-                Err("no browser backend is available on this platform".into())
-            }
-        }
-        "wkwebview" if available.wkwebview => Ok(BrowserEngine::WkWebView),
-        "chrome-cdp" if available.chrome_cdp => Ok(BrowserEngine::ChromeCdp),
-        "wkwebview" => Err("WKWebView backend is unavailable on this platform".into()),
-        "chrome-cdp" => Err("CHROME_NOT_INSTALLED: Chrome 136+ not available; install Google Chrome in /Applications".into()),
-        other => Err(format!("unknown browser engine {other:?}; expected auto, wkwebview or chrome-cdp")),
-    }
-}
-
-/// Restoring a previously saved pane is DIFFERENT from creating a new tab:
-/// a missing engine field always means WKWebView, regardless of Chrome.
-pub fn from_persisted(props: &Value) -> Result<BrowserEngine, String> {
-    match props.get("engine") {
-        None => Ok(BrowserEngine::WkWebView),
-        Some(Value::String(engine)) if engine == "wkwebview" => Ok(BrowserEngine::WkWebView),
-        Some(Value::String(engine)) if engine == "chrome-cdp" => Ok(BrowserEngine::ChromeCdp),
-        Some(Value::String(other)) => Err(format!("unsupported persisted browser engine {other:?}")),
-        Some(_) => Err("persisted browser engine must be a string".into()),
-    }
-}
-
-/// Updating the address must not lose engine identity or other pane metadata.
-pub fn set_pane_url(props: &mut Value, url: &str) {
-    if !props.is_object() {
-        *props = json!({});
-    }
-    props["url"] = json!(url);
+    herdr_webview_adapter::engine_policy::resolve_new_tab(
+        requested,
+        herdr_webview_adapter::engine_policy::Availability {
+            wkwebview: available.wkwebview,
+            chrome_cdp: available.chrome_cdp,
+        },
+    )
 }
 
 /// Capability detection reflects shipped implementation, not desired scope.

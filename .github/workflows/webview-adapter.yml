@@ -1,0 +1,33 @@
+name: webview-adapter
+
+on:
+  push:
+    branches: [feature/native-browser-tabs]
+    paths:
+      - 'crates/herdr-webview-adapter/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/webview-adapter.yml'
+  pull_request:
+    branches: [feature/native-browser-tabs]
+    paths:
+      - 'crates/herdr-webview-adapter/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/webview-adapter.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  adapter-unit:
+    name: adapter-unit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.95.0'
+      - name: Unit tests for standalone-ready adapter
+        run: cargo test --locked -p herdr-webview-adapter

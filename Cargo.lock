@@ -4165,6 +4165,7 @@ dependencies = [
  "block2 0.6.2",
  "fancy-regex 0.19.2",
  "ghostty-sys",
+ "herdr-webview-adapter",
  "gpui-base",
  "gpui-pre",
  "gpui-pre-linux",
@@ -4201,6 +4202,14 @@ dependencies = [
  "url",
  "windows-sys 0.61.2",
  "winresource",
+]
+
+[[package]]
+name = "herdr-webview-adapter"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "url",
 ]
 
 [[package]]

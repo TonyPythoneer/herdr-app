@@ -1,0 +1,105 @@
+//! Portable engine selection and persisted-pane policy (no platform discovery).
+//! The consuming host supplies real backend availability; no implicit fallback.
+use serde_json::{Value, json};
+
+pub const API_VERSION: &str = "1.0";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BrowserEngine {
+    WkWebView,
+    ChromeCdp,
+}
+
+impl BrowserEngine {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::WkWebView => "wkwebview",
+            Self::ChromeCdp => "chrome-cdp",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Availability {
+    pub wkwebview: bool,
+    pub chrome_cdp: bool,
+}
+
+/// Resolve a NEW tab's engine. An omitted/"auto" choice prefers a usable
+/// Chrome backend and otherwise chooses WKWebView. An explicit choice never
+/// falls back silently. "chrome_cdp" means the complete renderer/automation
+/// backend is usable, not merely that Google Chrome exists on disk.
+pub fn resolve_new_tab(requested: Option<&str>, available: Availability) -> Result<BrowserEngine, String> {
+    match requested.unwrap_or("auto") {
+        "auto" => {
+            if available.chrome_cdp {
+                Ok(BrowserEngine::ChromeCdp)
+            } else if available.wkwebview {
+                Ok(BrowserEngine::WkWebView)
+            } else {
+                Err("no browser backend is available on this platform".into())
+            }
+        }
+        "wkwebview" if available.wkwebview => Ok(BrowserEngine::WkWebView),
+        "chrome-cdp" if available.chrome_cdp => Ok(BrowserEngine::ChromeCdp),
+        "wkwebview" => Err("WKWebView backend is unavailable on this platform".into()),
+        "chrome-cdp" => Err("CHROME_NOT_INSTALLED: Chrome 136+ not available; install Google Chrome in /Applications".into()),
+        other => Err(format!("unknown browser engine {other:?}; expected auto, wkwebview or chrome-cdp")),
+    }
+}
+
+/// Restoring a previously saved pane is DIFFERENT from creating a new tab:
+/// a missing engine field always means WKWebView, regardless of Chrome.
+pub fn from_persisted(props: &Value) -> Result<BrowserEngine, String> {
+    match props.get("engine") {
+        None => Ok(BrowserEngine::WkWebView),
+        Some(Value::String(engine)) if engine == "wkwebview" => Ok(BrowserEngine::WkWebView),
+        Some(Value::String(engine)) if engine == "chrome-cdp" => Ok(BrowserEngine::ChromeCdp),
+        Some(Value::String(other)) => Err(format!("unsupported persisted browser engine {other:?}")),
+        Some(_) => Err("persisted browser engine must be a string".into()),
+    }
+}
+
+/// Updating the address must not lose engine identity or other pane metadata.
+pub fn set_pane_url(props: &mut Value, url: &str) {
+    if !props.is_object() {
+        *props = json!({});
+    }
+    props["url"] = json!(url);
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    const BOTH: Availability = Availability { wkwebview: true, chrome_cdp: true };
+    const WK_ONLY: Availability = Availability { wkwebview: true, chrome_cdp: false };
+
+    #[test]
+    fn new_tab_prefers_chrome_but_explicit_engine_is_strict() {
+        assert_eq!(resolve_new_tab(None, BOTH).unwrap(), BrowserEngine::ChromeCdp);
+        assert_eq!(resolve_new_tab(Some("auto"), WK_ONLY).unwrap(), BrowserEngine::WkWebView);
+        assert_eq!(resolve_new_tab(Some("wkwebview"), BOTH).unwrap(), BrowserEngine::WkWebView);
+        assert!(resolve_new_tab(Some("chrome-cdp"), WK_ONLY).is_err());
+        assert!(resolve_new_tab(Some("bogus"), BOTH).is_err());
+        assert!(resolve_new_tab(None, Availability { wkwebview: false, chrome_cdp: false }).is_err());
+    }
+
+    #[test]
+    fn missing_persisted_engine_is_always_legacy_webkit() {
+        assert_eq!(from_persisted(&json!({"url":"https://example.com"})).unwrap(), BrowserEngine::WkWebView);
+        assert_eq!(from_persisted(&Value::Null).unwrap(), BrowserEngine::WkWebView);
+        assert_eq!(from_persisted(&json!({"engine":"chrome-cdp"})).unwrap(), BrowserEngine::ChromeCdp);
+        assert!(from_persisted(&json!({"engine":"auto"})).is_err());
+        assert!(from_persisted(&json!({"engine":42})).is_err());
+    }
+
+    #[test]
+    fn navigation_preserves_engine_and_extension_metadata() {
+        let mut props = json!({"url":"https://old.example", "engine":"chrome-cdp", "custom":"keep"});
+        set_pane_url(&mut props, "https://new.example/");
+        assert_eq!(props["url"], "https://new.example/");
+        assert_eq!(props["engine"], "chrome-cdp");
+        assert_eq!(props["custom"], "keep");
+    }
+}
