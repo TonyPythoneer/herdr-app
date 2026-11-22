@@ -273,7 +273,7 @@ Dispatch a browser key; a key that could submit a form requires approval.
 
 ## `browser.scroll`
 
-Scroll the selected Chrome CDP page; WKWebView scroll is not yet available.
+Scroll the selected browser pane using native Chrome CDP or WKWebView wheel input.
 
 | Argument | Required |
 |---|---|
