@@ -15,7 +15,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         mpsc::{self, Receiver, Sender, SyncSender},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 const MAX_MESSAGE: usize = 32 * 1024 * 1024;
@@ -99,7 +99,16 @@ pub struct Client {
     writer: Mutex<File>,
     next_id: AtomicU64,
     pending: Mutex<HashMap<u64, Sender<Result<Value, String>>>>,
-    frames: Mutex<HashMap<String, SyncSender<Vec<u8>>>>,
+    // Keep the CDP reader free of PNG decoding; its job is dispatching
+    // responses promptly, including navigation and security-sensitive inputs.
+    frames: Mutex<HashMap<String, SyncSender<String>>>,
+    // Screencast ACK writes must never happen inside the pipe reader:
+    // Chrome can block writing a large PNG while waiting for the next ACK.
+    // Writing an ACK synchronously from its reader creates a pipe deadlock.
+    // ACKs are tiny and Chrome throttles frames on them, so this queue must
+    // never drop one (a dropped ACK stalls the stream) and never block the
+    // reader; an unbounded channel gives both.
+    frame_acks: Sender<(String, i64)>,
 }
 
 impl Client {
@@ -121,6 +130,15 @@ impl Client {
             .arg("--no-first-run")
             .arg("--no-default-browser-check")
             .arg("--disable-background-networking")
+            // Chrome 158+ initialises the "Chrome Safe Storage" keychain item
+            // on the first real navigation and blocks forever when HOME is
+            // fresh (CI, disposable homes): the page stays on about:blank and
+            // Page.navigate stops answering. Every macOS automation stack
+            // (Playwright, Puppeteer, Selenium) passes --use-mock-keychain for
+            // exactly this. shortcut: cookies in this private agent-only
+            // profile are obfuscated with a fixed key instead of the login
+            // keychain, upgrade if the profile ever stores real credentials.
+            .arg("--use-mock-keychain")
             .arg("about:blank")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -147,18 +165,33 @@ impl Client {
         };
         let writer = unsafe { File::from_raw_fd(cmd_write) };
         let reader = unsafe { File::from_raw_fd(out_read) };
+        let (frame_acks, ack_rx) = mpsc::channel::<(String, i64)>();
         let client = Arc::new(Self {
             child: Mutex::new(child),
             writer: Mutex::new(writer),
             next_id: AtomicU64::new(1),
             pending: Mutex::new(HashMap::new()),
             frames: Mutex::new(HashMap::new()),
+            frame_acks,
         });
         let weak = Arc::downgrade(&client);
         std::thread::Builder::new()
             .name("herdr-chrome-cdp-read".into())
             .spawn(move || read_messages(reader, weak))
             .map_err(|e| format!("cannot create CDP reader: {e}"))?;
+        let weak = Arc::downgrade(&client);
+        std::thread::Builder::new()
+            .name("herdr-chrome-cdp-ack".into())
+            .spawn(move || {
+                while let Ok((session, frame_id)) = ack_rx.recv() {
+                    let Some(client) = weak.upgrade() else { break };
+                    if client.send("Page.screencastFrameAck",
+                        json!({"sessionId":frame_id}), Some(&session)).is_err() {
+                        break;
+                    }
+                }
+            })
+            .map_err(|e| format!("cannot create CDP ACK writer: {e}"))?;
         client.request("Browser.getVersion", json!({}), None)?;
         Ok(client)
     }
@@ -214,22 +247,29 @@ impl Client {
         let Some(session) = message.get("sessionId").and_then(Value::as_str) else { return };
         let Some(params) = message.get("params") else { return };
         if let Some(frame_id) = params.get("sessionId").and_then(Value::as_i64) {
-            // Always ACK even if the frame is discarded, otherwise rendering stalls.
-            let _ = self.send("Page.screencastFrameAck", json!({"sessionId":frame_id}), Some(session));
+            // Never block the only CDP reader on a write into Chrome's pipe.
+            // Even discarded frames need ACKs to keep the screencast moving.
+            let _ = self.frame_acks.send((session.to_owned(), frame_id));
         }
         let Some(data) = params.get("data").and_then(Value::as_str) else { return };
         if data.len() > MAX_FRAME_BASE64 { return }
         let sender = self.frames.lock().unwrap().get(session).cloned();
         if let Some(sender) = sender {
-            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) {
-                let _ = sender.try_send(bytes); // newest frame replaces only after consumer drains
-            }
+            // Decoding a high-frequency PNG here delays unrelated CDP replies.
+            // Only enqueue bounded encoded data; the frame consumer decodes it.
+            let _ = sender.try_send(data.to_owned());
         }
     }
 
     pub fn open(self: &Arc<Self>, url: &str) -> Result<Session, String> {
         let url = crate::browser::normalize_url(url)?;
-        let target = self.request("Target.createTarget", json!({"url":"about:blank"}), None)?
+        // Create the real destination directly as the first page in the target.
+        // The old about:blank -> Page.startScreencast -> Page.navigate sequence
+        // consistently hangs ONLY in the packaged GUI app (while the isolated
+        // Rust fixture passes), even with off-thread PNG decoding/ACK writes.
+        // Target.createTarget(url) lets Chrome navigate during target creation,
+        // before any screen frames or CDP per-target commands are subscribed.
+        let target = self.request("Target.createTarget", json!({"url":url}), None)?
             .get("targetId").and_then(Value::as_str).ok_or("CDP targetId missing")?.to_owned();
         let session = self.request("Target.attachToTarget", json!({"targetId":target,"flatten":true}), None)?
             .get("sessionId").and_then(Value::as_str).ok_or("CDP sessionId missing")?.to_owned();
@@ -238,9 +278,53 @@ impl Client {
         let pane = Session { client: self.clone(), target, session, frames: Mutex::new(rx) };
         pane.command("Page.enable", json!({}))?;
         pane.command("Runtime.enable", json!({}))?;
+        // Chrome 144+ may leave a newly attached target waiting for the
+        // debugger even after domain enable succeeds. A suspended target can
+        // respond to enable/evaluate but never navigate or fetch page content.
+        // Resume before any navigation, screencast or network-dependent work.
+        // Use ordered CDP pipe delivery without waiting on the paused renderer:
+        // runIfWaitingForDebugger is a no-op for already-running targets.
+        pane.post("Runtime.runIfWaitingForDebugger", json!({}))?;
         pane.resize(1024, 768)?;
+        // Chrome may create an attached target while its initial navigation is
+        // still pending. Starting Page.startScreencast before the renderer has
+        // an interactive document causes a persistent blank pane in the real
+        // packaged App, even though the isolated CDP fixture can pass.
+        // Explicitly establish a navigated document *before* frame capture.
+        let started = Instant::now();
+        let mut retried_navigation = false;
+        let mut saw_blank = true;
+        let mut last_state = "unknown".to_owned();
+        let mut ready = false;
+        while started.elapsed() < Duration::from_secs(20) {
+            if let Ok(state) = pane.eval("({href:location.href,ready:document.readyState})") {
+                let href = state["href"].as_str().unwrap_or("");
+                let phase = state["ready"].as_str().unwrap_or("unknown");
+                saw_blank = href.is_empty() || href == "about:blank";
+                last_state = phase.to_owned();
+                if !saw_blank && matches!(phase, "interactive" | "complete") {
+                    ready = true;
+                    break;
+                }
+            }
+            // Target.createTarget(url) should initiate navigation, but some
+            // packaged Chrome launches remain on about:blank. Retry once via
+            // Page.navigate *before* screencast starts, not while PNG events
+            // are filling the debugging pipe.
+            if saw_blank && !retried_navigation
+                && started.elapsed() > Duration::from_secs(2)
+            {
+                retried_navigation = true;
+                pane.navigate(&url)?;
+            }
+            std::thread::sleep(Duration::from_millis(150));
+        }
+        if !ready {
+            return Err(format!(
+                "CHROME_DOCUMENT_NOT_READY: initial target never became interactive (phase={last_state}, blank={saw_blank}, retry={retried_navigation})"
+            ));
+        }
         pane.command("Page.startScreencast", json!({"format":"png","everyNthFrame":1}))?;
-        pane.navigate(&url)?;
         Ok(pane)
     }
 }
@@ -272,13 +356,15 @@ impl Drop for Client {
 fn read_messages(mut reader: File, client: Weak<Client>) {
     let mut chunk = [0u8; 32768];
     let mut buffer = Vec::<u8>::new();
-    loop {
+    'read: loop {
         let Ok(read) = reader.read(&mut chunk) else { break };
         if read == 0 { break }
         for byte in &chunk[..read] {
             if *byte != 0 {
                 buffer.push(*byte);
-                if buffer.len() > MAX_MESSAGE { return }
+                // Fall through to the disconnect path below so in-flight
+                // requests fail immediately instead of timing out one by one.
+                if buffer.len() > MAX_MESSAGE { break 'read }
                 continue;
             }
             if let Ok(value) = serde_json::from_slice(&buffer)
@@ -301,7 +387,7 @@ pub struct Session {
     client: Arc<Client>,
     pub target: String,
     pub session: String,
-    frames: Mutex<Receiver<Vec<u8>>>,
+    frames: Mutex<Receiver<String>>,
 }
 
 impl Session {
@@ -353,7 +439,10 @@ impl Session {
     }
 
     pub fn frame_timeout(&self, timeout: Duration) -> Result<Vec<u8>, String> {
-        self.frames.lock().unwrap().recv_timeout(timeout).map_err(|e| format!("Chrome screencast frame unavailable: {e}"))
+        let encoded = self.frames.lock().unwrap().recv_timeout(timeout)
+            .map_err(|e| format!("Chrome screencast frame unavailable: {e}"))?;
+        base64::engine::general_purpose::STANDARD.decode(encoded)
+            .map_err(|e| format!("invalid Chrome screencast frame: {e}"))
     }
 
     pub fn click_at(&self, x: f64, y: f64) -> Result<(), String> {
@@ -450,7 +539,7 @@ mod tests {
                     Ok((mut connection, _)) => {
                         let mut request = [0u8; 4096];
                         let _ = connection.read(&mut request);
-                        let body = "<html><head><title>Herdr fixture</title></head><body><button id='click' onclick=\"document.getElementById('state').textContent='clicked'\">Click</button><span id='state'>idle</span><input id='text'></body></html>";
+                        let body = "<html><head><title>Herdr fixture</title></head><body><button id='click' onclick=\"document.getElementById('state').textContent='clicked'\">Click</button><span id='state'>idle</span><input id='text'><input id='otp' autocomplete='one-time-code' value='481902'><input id='card' autocomplete='cc-number' value='4111111111111111'><input id='pass' type='password' value='Secret1'><form onsubmit=\"event.preventDefault();window.__submitted=true\"><button id='disguised-submit' type='submit'>Search</button></form><a id='destructive-link' href='/delete/account'>Search</a><script>window.__submitted=false</script></body></html>";
                         let _ = write!(connection, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
                     }
                     Err(_) => std::thread::sleep(Duration::from_millis(10)),
@@ -486,11 +575,35 @@ mod tests {
             .expect("Chrome query over the real page");
         assert_eq!(query["count"], 1);
         assert_eq!(query["elements"][0]["tag"], "button");
+        // Observe through the real CDP page, not a mocked DOM. Ordinary
+        // text remains inspectable; credentials, OTPs and card numbers do not.
+        for selector in ["#otp", "#card", "#pass"] {
+            let value = crate::browser_api::run(&pane, "browser.inspect",
+                &json!({"target":{"css":selector}}), false, &cancelled)
+                .expect("bounded real Chrome DOM inspection");
+            assert_eq!(value["elements"][0]["value"], "[REDACTED]", "{selector}");
+        }
+        let original = crate::browser_api::run(&pane, "browser.inspect",
+            &json!({"target":{"css":"#text"}}), false, &cancelled).unwrap();
+        assert_eq!(original["elements"][0]["value"], "Herdr CDP input");
+        let error = crate::browser_api::run(&pane, "browser.fill",
+            &json!({"target":{"css":"#otp"},"value":"123456"}), false, &cancelled)
+            .expect_err("OTP must not be filled without native user approval");
+        assert!(error.starts_with("APPROVAL_REQUIRED"));
+        assert_eq!(pane.eval("document.getElementById('otp').value").unwrap(), "481902",
+            "rejected sensitive typing must leave the original code unchanged");
         let snapshot = crate::browser_api::run(&pane, "browser.snapshot",
             &json!({"max_nodes":50}), false, &cancelled)
             .expect("Chrome DOM snapshot");
         assert_eq!(snapshot["title"], "Herdr fixture");
         assert!(snapshot["elements"].as_array().is_some_and(|v| !v.is_empty()));
+        let serialized=snapshot.to_string();
+        for secret in ["481902","4111111111111111","Secret1"] {
+            assert!(!serialized.contains(secret),"Chrome snapshot leaked a sensitive fixture value");
+        }
+        assert!(snapshot["elements"].as_array().unwrap().iter()
+            .any(|entry| entry["value"]=="[REDACTED]"),
+            "snapshot must redacted sensitive inputs instead of bypassing inspect's serializer");
         let error = crate::browser_api::run(&pane, "browser.eval",
             &json!({"expression":"document.title"}), false, &cancelled)
             .expect_err("arbitrary JavaScript must require native user approval");
@@ -499,6 +612,25 @@ mod tests {
             &json!({"target":{"css":"button#click"}}), false, &cancelled)
             .expect_err("uncertain action must require native approval");
         assert!(error.starts_with("APPROVAL_REQUIRED"));
+        // The same native permission boundary must hold for all keyboard
+        // activation aliases. Return and Space used to bypass the Enter gate.
+        for key in ["Enter", "Return", "Space"] {
+            let error = crate::browser_api::run(&pane, "browser.press",
+                &json!({"key":key,"target":{"css":"#disguised-submit"}}), false, &cancelled)
+                .expect_err("a keyboard shortcut cannot approve its own submission");
+            assert!(error.starts_with("APPROVAL_REQUIRED"), "{key}: {error}");
+        }
+        assert_eq!(pane.eval("window.__submitted").unwrap(), false,
+            "denied native key paths must not submit the form");
+        // A label like 'Search' is not proof a button is safe: inspect its
+        // actual submit semantics, and reject destructive URLs behind labels.
+        for selector in ["#disguised-submit", "#destructive-link"] {
+            let error = crate::browser_api::run(&pane, "browser.click",
+                &json!({"target":{"css":selector}}), false, &cancelled)
+                .expect_err("disguised irreversible action must require native approval");
+            assert!(error.starts_with("APPROVAL_REQUIRED"), "{selector}: {error}");
+        }
+        assert_eq!(pane.eval("window.__submitted").unwrap(), false);
         assert_eq!(crate::browser_api::run(&pane, "browser.click",
             &json!({"target":{"css":"button#click"}}), true, &cancelled)
             .expect("native approved click")["clicked"], true);

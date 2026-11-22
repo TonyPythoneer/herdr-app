@@ -134,6 +134,7 @@ jobs:
           grep -Fq 'WK_TRUSTED_INPUT_VERIFIED: native click had isTrusted=true' "$RUNNER_TEMP/wk-trusted-input.log"
           grep -Fq 'WK_TRUSTED_KEY_VERIFIED: AppKit keyDown had isTrusted=true' "$RUNNER_TEMP/wk-trusted-input.log"
           grep -Fq 'WK_TRUSTED_TEXT_VERIFIED: native AppKit text produced trusted keydown and input value' "$RUNNER_TEMP/wk-trusted-input.log"
+          grep -Fq 'WK_TRUSTED_WHEEL_VERIFIED: native wheel isTrusted=true and page scrollY advanced' "$RUNNER_TEMP/wk-trusted-input.log"
       - name: Build macOS app through upstream packaging
         env:
           HERDR_BROWSER_FORK: "1"
@@ -164,7 +165,7 @@ jobs:
             --output dist/latest.json
           test -s dist/latest.json
       - name: Upload verified updater assets (Actions artifact only)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: Herdr-WebView-updater-assets
           path: |
@@ -173,7 +174,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
       - name: Upload macOS DMG artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: Herdr-Browser-macos-arm64
           path: dist/Herdr-Browser-macos-arm64.dmg
@@ -203,24 +204,163 @@ jobs:
           echo "- Cache write permitted: ${{ env.SAVE_CACHES }}" >> "$GITHUB_STEP_SUMMARY"
           echo "- DMG: Actions artifact only; stable release disabled until both real browser backends pass E2E" >> "$GITHUB_STEP_SUMMARY"
 
-  # Stable required status: green for docs-only, red for any mandatory build
-  # failure. A skipped heavy job must never hide a failed code build.
+  # Stable required status: for source changes, require the packaged
+  # app's real Chrome/WK CLI/MCP and native GPUI human authorization E2E.
+  # A green compile/package job must never conceal a failing application.
+  # For docs-only changes the heavy jobs must all be skipped.
   browser-ci:
     name: Browser CI required check
-    needs: [changes, browser-macos]
+    needs: [changes, browser-macos, wkwebview-native-e2e, browser-gpui-approval-e2e]
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: Enforce browser check result
+      - name: Enforce real packaged browser E2E results
         env:
           CLASSIFY_RESULT: ${{ needs.changes.result }}
           BUILD_REQUIRED: ${{ needs.changes.outputs.build }}
           BUILD_RESULT: ${{ needs.browser-macos.result }}
+          NATIVE_E2E_RESULT: ${{ needs.wkwebview-native-e2e.result }}
+          APPROVAL_E2E_RESULT: ${{ needs.browser-gpui-approval-e2e.result }}
         run: |
           set -euo pipefail
           [[ "$CLASSIFY_RESULT" == success ]] || exit 1
           if [[ "$BUILD_REQUIRED" == true ]]; then
             [[ "$BUILD_RESULT" == success ]] || exit 1
+            [[ "$NATIVE_E2E_RESULT" == success ]] || exit 1
+            [[ "$APPROVAL_E2E_RESULT" == success ]] || exit 1
           else
             [[ "$BUILD_RESULT" == skipped ]] || exit 1
+            [[ "$NATIVE_E2E_RESULT" == skipped ]] || exit 1
+            [[ "$APPROVAL_E2E_RESULT" == skipped ]] || exit 1
           fi
+
+
+  # Actual packaged-app E2E, not the isolated GPUI/WK fixture in the build job.
+  # Uses the official herdr-core in a disposable HOME and a loopback fixture.
+  # Both browser engines must work through the shipped CLI and stdio MCP.
+  wkwebview-native-e2e:
+    name: wkwebview-native-e2e
+    needs: [changes, browser-macos]
+    if: needs.changes.outputs.build == 'true' && needs.browser-macos.result == 'success'
+    runs-on: macos-15
+    timeout-minutes: 35
+    steps:
+      - name: Checkout exact tested source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download the actual updater archive from this same workflow run
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: Herdr-WebView-updater-assets
+          path: dist
+      - name: Extract and verify the shipped binary and signed app
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -xzf dist/herdr-app-macos-aarch64.tar.gz -C dist
+          app='dist/Herdr WebView.app'
+          test -x "$app/Contents/MacOS/Herdr"
+          codesign --verify --deep --strict "$app"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")" = 'dev.herdr.webview'
+          cmp assets/icons/Herdr.icns "$app/Contents/Resources/Herdr.icns"
+          "$app/Contents/MacOS/Herdr" --version
+      - name: Install real official herdr-core in an ephemeral location
+        shell: bash
+        run: |
+          set -euo pipefail
+          core_dir="$RUNNER_TEMP/webview-e2e-core"
+          mkdir -p "$core_dir"
+          curl -fsSL --retry 3 https://releases.herdr.dev/core/install.sh -o "$RUNNER_TEMP/herdr-core-install.sh"
+          HC_INSTALL_DIR="$core_dir" sh "$RUNNER_TEMP/herdr-core-install.sh"
+          core="$core_dir/herdr-core"
+          if [[ ! -x "$core" ]]; then core="$core_dir/hc"; fi
+          test -x "$core"
+          "$core" --version | grep '^hc '
+          echo "WEBVIEW_E2E_CORE=$core" >> "$GITHUB_ENV"
+      - name: Real Herdr WebView packaged WKWebView browser via CLI and MCP
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/webview_packaged_e2e.py \
+            --app 'dist/Herdr WebView.app/Contents/MacOS/Herdr' \
+            --core "$WEBVIEW_E2E_CORE" --engine wkwebview \
+            2>&1 | tee "$RUNNER_TEMP/packaged-wk-e2e.log"
+          grep -Fq 'PACKAGED_BROWSER_E2E_VERIFIED: wkwebview complete' "$RUNNER_TEMP/packaged-wk-e2e.log"
+          grep -Fq 'PACKAGED_MCP_VERIFIED:' "$RUNNER_TEMP/packaged-wk-e2e.log"
+      - name: Real Herdr WebView packaged Chrome CDP browser via CLI and MCP
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
+          python3 scripts/webview_packaged_e2e.py \
+            --app 'dist/Herdr WebView.app/Contents/MacOS/Herdr' \
+            --core "$WEBVIEW_E2E_CORE" --engine chrome-cdp \
+            2>&1 | tee "$RUNNER_TEMP/packaged-chrome-e2e.log"
+          grep -Fq 'PACKAGED_BROWSER_E2E_VERIFIED: chrome-cdp complete' "$RUNNER_TEMP/packaged-chrome-e2e.log"
+
+
+  # Real GPUI approval. An independent macOS process sends OS UI input into
+  # the *packaged* app's live approval dialog, not a debug API or mock callback.
+  # Both allowed and denied actions must have observable DOM postconditions.
+  browser-gpui-approval-e2e:
+    name: browser-gpui-approval-e2e
+    needs: [changes, browser-macos]
+    if: needs.changes.outputs.build == 'true' && needs.browser-macos.result == 'success'
+    runs-on: macos-15
+    timeout-minutes: 35
+    steps:
+      - name: Checkout exact tested source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download the real macOS App package
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: Herdr-WebView-updater-assets
+          path: dist
+      - name: Verify the real macOS app and prepare native OS input driver
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -xzf dist/herdr-app-macos-aarch64.tar.gz -C dist
+          app='dist/Herdr WebView.app'
+          test -x "$app/Contents/MacOS/Herdr"
+          codesign --verify --deep --strict "$app"
+          swiftc -O -o "$RUNNER_TEMP/herdr-native-approval-driver" \
+            scripts/webview_gpui_approval_driver.swift
+          test -x "$RUNNER_TEMP/herdr-native-approval-driver"
+      - name: Install official herdr-core into a disposable test home
+        shell: bash
+        run: |
+          set -euo pipefail
+          core_dir="$RUNNER_TEMP/webview-gpui-e2e-core"
+          mkdir -p "$core_dir"
+          curl -fsSL --retry 3 https://releases.herdr.dev/core/install.sh -o "$RUNNER_TEMP/herdr-core-install.sh"
+          HC_INSTALL_DIR="$core_dir" sh "$RUNNER_TEMP/herdr-core-install.sh"
+          core="$core_dir/herdr-core"
+          if [[ ! -x "$core" ]]; then core="$core_dir/hc"; fi
+          test -x "$core"
+          "$core" --version | grep '^hc '
+          echo "WEBVIEW_E2E_CORE=$core" >> "$GITHUB_ENV"
+      - name: Actual GPUI approval and denial in packaged WKWebView
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/webview_packaged_e2e.py \
+            --app 'dist/Herdr WebView.app/Contents/MacOS/Herdr' \
+            --core "$WEBVIEW_E2E_CORE" --engine wkwebview \
+            --approval-driver "$RUNNER_TEMP/herdr-native-approval-driver" \
+            2>&1 | tee "$RUNNER_TEMP/approval-wk-e2e.log"
+          grep -Fq 'PACKAGED_GPUI_APPROVAL_E2E_VERIFIED:' "$RUNNER_TEMP/approval-wk-e2e.log"
+      - name: Actual GPUI approval and denial in packaged Chrome CDP
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
+          python3 scripts/webview_packaged_e2e.py \
+            --app 'dist/Herdr WebView.app/Contents/MacOS/Herdr' \
+            --core "$WEBVIEW_E2E_CORE" --engine chrome-cdp \
+            --approval-driver "$RUNNER_TEMP/herdr-native-approval-driver" \
+            2>&1 | tee "$RUNNER_TEMP/approval-chrome-e2e.log"
+          grep -Fq 'PACKAGED_GPUI_APPROVAL_E2E_VERIFIED:' "$RUNNER_TEMP/approval-chrome-e2e.log"

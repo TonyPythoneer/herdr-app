@@ -2,8 +2,11 @@
 //! Synthetic DOM click() and dispatchEvent() are not substitutes for this.
 //! This module is intentionally NOT wired into Agent commands until a real
 //! macOS E2E verifies the website receives a trusted event.
-use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType};
-use objc2_foundation::{NSPoint, NSString};
+use objc2::{msg_send, MainThreadMarker, rc::Retained};
+use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType, NSScreen};
+use objc2_core_foundation::CGPoint;
+use objc2_core_graphics::{CGEvent, CGScrollEventUnit};
+use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 use wry::WebViewExtMacOS;
 
 #[derive(Clone, Copy, Debug)]
@@ -163,6 +166,81 @@ pub fn type_text(view: &gpui_wry::WebView, value: &str) -> Result<usize, String>
     Ok(events.len())
 }
 
+
+/// Convert the Agent's CSS pixel scroll deltas into WebKit's native Quartz
+/// wheel convention. Down/right in DOM coordinates are negative wheel deltas.
+/// Reject non-finite, enormous and no-op requests before creating any event.
+fn native_wheel_deltas(delta_x:f64,delta_y:f64)->Result<(i32,i32),String>{
+    let value=|v:f64| -> Result<i32,String>{
+        if !v.is_finite()||v.abs()>4096.0 {
+            return Err("INVALID_ARGUMENT: native WK scroll delta is not a bounded number".into());
+        }
+        Ok(v.round() as i32)
+    };
+    let (x,y)=(value(delta_x)?,value(delta_y)?);
+    if x==0 && y==0 {
+        return Err("INVALID_ARGUMENT: native WK scroll requires a nonzero delta".into());
+    }
+    Ok((-y,-x))
+}
+
+/// Deliver a Core Graphics wheel event to the actual WKWebView child, not a
+/// page script, a GPUI scroll container, or an unrelated window. This mirrors
+/// WebKit's own macOS test-runner input route (CGEvent -> NSEvent -> scrollWheel).
+/// Agent callers must re-observe the page to verify its desired scroll result.
+pub fn scroll_at(view:&gpui_wry::WebView, css_x:f64, css_y:f64,
+    delta_x:f64, delta_y:f64)->Result<(),String>
+{
+    let (wheel_y,wheel_x)=native_wheel_deltas(delta_x,delta_y)?;
+    if !view.visible(){
+        return Err("BROWSER_NOT_VISIBLE: native wheel requires the active WKWebView pane".into());
+    }
+    let wk=view.raw().webview();
+    let bounds=wk.bounds();
+    let pt=to_native_point(css_x,css_y,bounds.size.width,bounds.size.height,wk.isFlipped())?;
+    let window=wk.window().ok_or("BROWSER_NOT_READY: native wheel has no WK window")?;
+    if !window.isKeyWindow(){
+        return Err("BROWSER_NOT_FOCUSED: activate the Herdr window before native scrolling".into());
+    }
+    let location=wk.convertPoint_toView(NSPoint::new(pt.x,pt.y),None);
+    let rect=NSRect::new(location,NSSize::new(1.0,1.0));
+    let screen_point=window.convertRectToScreen(rect).origin;
+    let mtm=MainThreadMarker::new()
+        .ok_or("NATIVE_INPUT_FAILED: WK wheel requires the AppKit main thread")?;
+    let screens=NSScreen::screens(mtm);
+    let primary=screens.firstObject()
+        .ok_or("NATIVE_INPUT_FAILED: main display unavailable")?;
+    let primary_bounds=primary.frame();
+    let global=CGPoint::new(screen_point.x,primary_bounds.size.height-screen_point.y);
+    let cg=CGEvent::new_scroll_wheel_event2(None,CGScrollEventUnit::Pixel,2,wheel_y,wheel_x,0)
+        .ok_or("NATIVE_INPUT_FAILED: cannot create WK wheel CGEvent")?;
+    CGEvent::set_location(Some(&cg),global);
+    let native=NSEvent::eventWithCGEvent(&cg)
+        .ok_or("NATIVE_INPUT_FAILED: cannot create WK wheel NSEvent")?;
+    // Unlike mouseEventWithType, eventWithCGEvent has windowNumber=0 and no
+    // NSWindow associated with it. Directly calling WKWebView.scrollWheel()
+    // was observed to do nothing on real macOS CI (no trusted wheel and no
+    // scrollY change). WebKit's actual macOS WebDriver path performs the
+    // same window-relative conversion before [window sendEvent:].
+    //
+    // This is a narrowly scoped AppKit private selector. Fail closed when
+    // unavailable rather than silently fabricating a successful scroll. The
+    // supported long-term direction is an OS-provided public automation API.
+    // SAFETY: _eventRelativeToWindow: is an instance method taking an
+    // NSWindow pointer and returning an autoreleased NSEvent. Both classes
+    // and the selector signature are verified in WebKit's macOS automation.
+    let associated: Option<Retained<NSEvent>> = unsafe {
+        msg_send![&*native, _eventRelativeToWindow: &*window]
+    };
+    let associated=associated.ok_or(
+        "NATIVE_INPUT_FAILED: cannot associate wheel with the WK window")?;
+    if associated.windowNumber()!=window.windowNumber() {
+        return Err("NATIVE_INPUT_FAILED: WK wheel event targets a different window".into());
+    }
+    window.sendEvent(&associated);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,6 +251,15 @@ mod tests {
         assert_eq!(ascii_keycode('1').unwrap(),(18,false));
         for ch in ['\n','\t','中','!','\0'] {
             assert!(ascii_keycode(ch).is_err());
+        }
+    }
+    #[test]
+    fn native_scroll_deltas_are_bounded_and_follow_dom_direction(){
+        assert_eq!(native_wheel_deltas(0.0,120.0).unwrap(),(-120,0));
+        assert_eq!(native_wheel_deltas(45.0,-60.0).unwrap(),(60,-45));
+        for (x,y) in [(0.0,0.0),(0.1,0.1),(f64::INFINITY,3.0),
+                      (1.0,f64::NAN),(4097.0,1.0)] {
+            assert!(native_wheel_deltas(x,y).is_err());
         }
     }
     #[test]

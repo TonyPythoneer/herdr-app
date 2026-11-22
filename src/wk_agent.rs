@@ -1,6 +1,7 @@
 //! WKWebView Agent observation and explicit page-context eval.
 //! Only a native Wry callback can produce a completed result; a fire-and-
 //! forget JavaScript call is never reported as success.
+use crate::browser_api::{activating_key, locator, wait_condition, wait_probe};
 use serde_json::{json, Value};
 
 const MAX_SCRIPT: usize = 65_536;
@@ -22,41 +23,12 @@ url:location.href,elements,truncated:nodes.length>elements.length}}}};
 "#)
         }
         "browser.query" | "browser.inspect" => {
-            let target = args.get("target").ok_or("INVALID_ARGUMENT: target required")?;
-            let object = target.as_object().ok_or("INVALID_ARGUMENT: target must be an object")?;
-            let choices = ["css","role","label","text","test_id","ref"];
-            if choices.iter().filter(|choice| object.contains_key(**choice)).count() != 1
-                || object.keys().any(|key| !choices.contains(&key.as_str()) && !["name","exact","snapshot_id"].contains(&key.as_str()))
-            {
-                return Err("INVALID_ARGUMENT: target requires exactly one locator type".into());
-            }
-            for (key, value) in object {
-                if key == "exact" {
-                    if !value.is_boolean() {return Err("INVALID_ARGUMENT: exact must be boolean".into());}
-                } else if value.as_str().is_none_or(|s| s.len()>512) {
-                    return Err(format!("INVALID_ARGUMENT: invalid target.{key}"));
-                }
-            }
+            locator(args, false)?;
             let limit = if command == "browser.inspect" {1} else {50};
             format!("const els=select();return {{ok:true,result:{{count:els.length,truncated:els.length>{limit},elements:els.slice(0,{limit}).map(summary)}}}};")
         }
         "browser.click" => {
-            let target=args.get("target").and_then(Value::as_object)
-                .ok_or("INVALID_ARGUMENT: click target must be an object")?;
-            let choices=["css","role","label","text","test_id","ref"];
-            if choices.iter().filter(|choice| target.contains_key(**choice)).count()!=1
-                || target.keys().any(|key| !choices.contains(&key.as_str())
-                    && !["name","exact","snapshot_id"].contains(&key.as_str()))
-            {
-                return Err("INVALID_ARGUMENT: click requires exactly one supported locator".into());
-            }
-            for (key,value) in target {
-                if key=="exact" {
-                    if !value.is_boolean(){return Err("INVALID_ARGUMENT: exact must be boolean".into())}
-                } else if value.as_str().is_none_or(|s| s.is_empty()||s.len()>512) {
-                    return Err(format!("INVALID_ARGUMENT: invalid click target.{key}"));
-                }
-            }
+            locator(args, false)?;
             let expected=args.get("document_id").unwrap_or(&Value::Null);
             if !expected.is_null() && expected.as_str().is_none_or(|s| s.len()>2048){
                 return Err("INVALID_ARGUMENT: document_id must be a string".into());
@@ -76,14 +48,10 @@ const box=el.getBoundingClientRect();
 const x=box.x+box.width/2,y=box.y+box.height/2;
 const top=document.elementFromPoint(x,y);
 if(!top||(top!==el&&!el.contains(top)))return {{ok:false,error:'ELEMENT_OBSCURED'}};
-const label=name(el).toLowerCase().slice(0,100);
-const dangerous=/pay|buy|purchase|checkout|send|delete|remove|transfer|publish|confirm|order|submit|unsubscribe|account|save|security/i.test(label)
-    ||(el.tagName==='BUTTON'&&el.type==='submit'&&!el.closest('form[role=search]'));
-const known=(el.tagName==='A'&&/^https?:/.test(el.href))||
- /^(search|next|back|previous|open|close|show|hide|expand|collapse|filter|play|pause)$/i.test(label);
-if(!{approved}&&(dangerous||!known))
- return {{ok:false,error:'APPROVAL_REQUIRED: native click on uncertain or consequential site control '+label}};
-return {{ok:true,result:{{x,y,native:true,document_id:current,label}}}};
+const risk=riskOf(el);
+if(!{approved}&&(risk.dangerous||risk.unknown))
+ return {{ok:false,error:'APPROVAL_REQUIRED: native click on uncertain or consequential site control '+risk.label}};
+return {{ok:true,result:{{x,y,native:true,document_id:current,label:risk.label}}}};
 "#)
         }
         "browser.click_at" => {
@@ -100,11 +68,7 @@ return {{ok:true,result:{{x,y,native:true,document_id:current,label}}}};
             format!("return {{ok:true,result:{{x:{x},y:{y},native:true}}}};")
         }
         "browser.fill" | "browser.type" => {
-            let loc=args.get("target").and_then(Value::as_object)
-                .ok_or("INVALID_ARGUMENT: native text target must be a locator object")?;
-            if loc.len()!=1 || loc.get("css").and_then(Value::as_str).is_none_or(|s| s.is_empty()||s.len()>512) {
-                return Err("INVALID_ARGUMENT: native WK text target supports one CSS selector".into());
-            }
+            locator(args, true)?;
             let key=if command=="browser.fill"{"value"}else{"text"};
             let value=args.get(key).and_then(Value::as_str)
                 .ok_or("INVALID_ARGUMENT: missing text value")?;
@@ -117,9 +81,8 @@ return {{ok:true,result:{{x,y,native:true,document_id:current,label}}}};
             } else { "" };
             format!(r#"
 const els=select();if(els.length!==1)return {{ok:false,error:els.length===0?'LOCATOR_NOT_FOUND':'LOCATOR_AMBIGUOUS'}};
-const el=els[0];if(!visible(el)||el.disabled||el.readOnly)return {{ok:false,error:'ELEMENT_NOT_ACTIONABLE'}};
-if(!['INPUT','TEXTAREA'].includes(el.tagName)&&!el.isContentEditable)return {{ok:false,error:'NOT_EDITABLE'}};
-if((el.type==='password'||(el.autocomplete||'').startsWith('cc-'))&&!{approved})
+const el=els[0];const gate=editable(el);if(gate)return {{ok:false,error:gate.error}};
+if(sensitive(el)&&!{approved})
  return {{ok:false,error:'APPROVAL_REQUIRED: typing sensitive form values'}};
 el.focus();{select}
 return {{ok:true,result:{{native:true,text_ready:true}}}};
@@ -132,15 +95,11 @@ return {{ok:true,result:{{native:true,text_ready:true}}}};
                   "ArrowLeft","ArrowRight","ArrowDown","ArrowUp","Space"].contains(&key) {
                 return Err("INVALID_ARGUMENT: unsupported native WK key".into());
             }
-            if matches!(key,"Enter"|"Return"|"Space") && !approved {
+            if activating_key(key) && !approved {
                 return Err("APPROVAL_REQUIRED: native key could submit or activate a site action".into());
             }
-            let target = args.get("target");
-            let focus = if let Some(target) = target {
-                let object=target.as_object().ok_or("INVALID_ARGUMENT: press target must be a locator object")?;
-                if object.len()!=1 || object.get("css").and_then(Value::as_str).is_none_or(|s| s.is_empty()||s.len()>512) {
-                    return Err("INVALID_ARGUMENT: press target supports a bounded CSS selector only".into());
-                }
+            let focus = if args.get("target").is_some() {
+                locator(args, true)?;
                 format!(r#"
 const matches=select();
 if(matches.length!==1)return {{ok:false,error:matches.length===0?'LOCATOR_NOT_FOUND':'LOCATOR_AMBIGUOUS'}};
@@ -151,44 +110,32 @@ matches[0].focus();
             let key=serde_json::to_string(key).map_err(|e|e.to_string())?;
             format!("{focus}return {{ok:true,result:{{key:{key},native:true}}}};")
         }
-        "browser.wait" => {
-            let condition=args.get("condition").and_then(Value::as_object)
-                .ok_or("INVALID_ARGUMENT: wait condition must be an object")?;
-            if condition.is_empty() || condition.len()>4
-                || condition.keys().any(|key| !["url","selector","state","text"].contains(&key.as_str())) {
-                return Err("INVALID_ARGUMENT: unsupported or empty wait condition".into());
-            }
-            for (key, value) in condition {
-                let text=value.as_str().ok_or("INVALID_ARGUMENT: wait fields must be strings")?;
-                let limit=if key=="url"{2048}else{512};
-                if text.is_empty()||text.len()>limit {
-                    return Err(format!("INVALID_ARGUMENT: wait condition.{key} is too long or empty"));
+        "browser.scroll" => {
+            // Numbers, not page-controlled expressions. Use the real viewport
+            // center when coordinates are omitted; native AppKit validates
+            // the final location against the attached WK child bounds.
+            let pixel = |key:&str, default:f64| -> Result<f64,String> {
+                let value=args.get(key).map(Value::as_f64).unwrap_or(Some(default))
+                    .ok_or_else(||format!("INVALID_ARGUMENT: {key} requires a number"))?;
+                if !value.is_finite()||value.abs()>8192.0 {
+                    return Err(format!("INVALID_ARGUMENT: {key} is out of range"));
                 }
+                Ok(value)
+            };
+            let dx=pixel("delta_x",0.0)?;
+            let dy=pixel("delta_y",0.0)?;
+            if dx.abs()>4096.0||dy.abs()>4096.0||(dx.round()==0.0&&dy.round()==0.0) {
+                return Err("INVALID_ARGUMENT: WK scroll requires a bounded nonzero delta".into());
             }
-            if condition.contains_key("state") &&
-                (!condition.contains_key("selector") ||
-                 !["visible","hidden"].contains(&condition["state"].as_str().unwrap_or("")))
-            {
-                return Err("INVALID_ARGUMENT: state requires selector and visible|hidden".into());
-            }
-            if !condition.contains_key("url") && !condition.contains_key("selector") && !condition.contains_key("text") {
-                return Err("INVALID_ARGUMENT: wait needs a URL, selector or text condition".into());
-            }
-            if args.get("timeout_ms").is_some_and(|v| v.as_u64().is_none_or(|t| t==0 || t>30000)) {
-                return Err("INVALID_ARGUMENT: timeout_ms must be 1..30000".into());
-            }
-            let cond_json=Value::Object(condition.clone()).to_string();
-            format!(r#"
-const c={cond_json};let matched=true;
-if(c.url!==undefined)matched=matched&&location.href.includes(c.url);
-if(c.selector!==undefined){{
- const el=document.querySelector(c.selector);
- const shown=!!el&&visible(el);
- matched=matched&&(c.state==='hidden'?!shown:shown);
-}}
-if(c.text!==undefined)matched=matched&&!!document.body&&document.body.innerText.includes(c.text);
-return {{ok:true,result:{{matched:!!matched,url:location.href}}}};
-"#)
+            let x=if args.get("x").is_some(){pixel("x",0.0)?.to_string()}else{"innerWidth/2".into()};
+            let y=if args.get("y").is_some(){pixel("y",0.0)?.to_string()}else{"innerHeight/2".into()};
+            format!("return {{ok:true,result:{{x:{x},y:{y},delta_x:{dx},delta_y:{dy},native:true}}}};")
+        }
+        "browser.wait" => {
+            let cond=wait_condition(args)?;
+            let probe=wait_probe(&cond);
+            format!(r#"{probe}
+return {{ok:true,result:{{matched:!!matched,url:location.href}}}};"#)
         }
         "browser.eval" => {
             if !approved {
@@ -254,6 +201,21 @@ mod tests {
         assert!(script("browser.click", &json!({"target":{"css":"button"}}),true).unwrap().contains("native:true"));
     }
     #[test]
+    fn wk_native_scroll_uses_bounded_pixel_deltas_and_viewport_coordinates(){
+        let generated=script("browser.scroll",&json!({"delta_y":200.0}),false).unwrap();
+        assert!(generated.contains("innerWidth/2"));
+        assert!(generated.contains("innerHeight/2"));
+        assert!(generated.contains("delta_y:200"));
+        assert!(generated.contains("native:true"));
+        for args in [
+            json!({}),json!({"delta_y":0}),json!({"delta_y":9000}),
+            json!({"delta_y":true}),json!({"delta_y":200,"x":-50_000}),
+            json!({"delta_y":200,"y":"document.cookie"})
+        ] {
+            assert!(script("browser.scroll",&args,false).is_err(),"unsafe WK scroll {args}");
+        }
+    }
+    #[test]
     fn wk_wait_supports_typed_conditions_without_injecting_js_literals() {
         let generated=script("browser.wait",&json!({
             "condition":{"selector":"#submit","state":"visible","text":"Done","url":"/next"},
@@ -285,6 +247,17 @@ mod tests {
             .unwrap_err().starts_with("APPROVAL_REQUIRED:"));
     }
     #[test]
+    fn wk_uses_shared_sensitive_input_and_destructive_destination_policy() {
+        let click=script("browser.click",&json!({"target":{"css":"a"}}),false).unwrap();
+        assert!(click.contains("riskOf(el)"));
+        assert_eq!(click.matches("const riskOf=").count(),1,"the shared risk policy is embedded exactly once");
+        assert_eq!(click.matches("const riskyHref=").count(),1,"click risk policy must not be copied per engine");
+        let fill=script("browser.fill",&json!({"target":{"css":"#otp"},"value":"481902"}),false).unwrap();
+        assert!(fill.contains("sensitive(el)"));
+        assert!(fill.contains("one-time-code"),"must include shared OTP redaction policy");
+    }
+
+    #[test]
     fn native_text_entry_has_bounded_locator_and_never_evaluates_input_as_js() {
         let fill=script("browser.fill",&json!({"target":{"css":"#field"},"value":"Hello World"}),false).unwrap();
         assert!(fill.contains("el.select()"));
@@ -300,8 +273,11 @@ mod tests {
     #[test]
     fn native_keypress_is_allowlisted_and_submission_requires_approval() {
         assert!(script("browser.press", &json!({"key":"Tab"}), false).unwrap().contains("native:true"));
-        assert!(script("browser.press", &json!({"key":"Enter"}), false).unwrap_err().starts_with("APPROVAL_REQUIRED:"));
-        assert!(script("browser.press", &json!({"key":"Enter"}), true).unwrap().contains("native:true"));
+        for key in ["Enter","Return","Space"] {
+            assert!(script("browser.press", &json!({"key":key}), false).unwrap_err()
+                .starts_with("APPROVAL_REQUIRED:"),"{key} must pass the shared activation gate");
+            assert!(script("browser.press", &json!({"key":key}), true).unwrap().contains("native:true"));
+        }
         assert!(script("browser.press", &json!({"key":"a"}), true).is_err());
         assert!(script("browser.press", &json!({"key":"Tab","target":{"css":"#field"}}), false)
             .unwrap().contains("matches[0].focus()"));

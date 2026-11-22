@@ -51,7 +51,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("browser.capabilities", &[],
         "Report browser engines actually available in this build and the new-tab default."),
     cmd("browser.list", &[], "List current Browser panes with their Herdr pane ids, URL and engine."),
-    cmd("browser.snapshot", &[req("pane"), opt("mode"), opt("max_nodes")], "Read a bounded semantic DOM snapshot in a Chrome pane."),
+    cmd("browser.snapshot", &[req("pane"), opt("mode"), opt("max_nodes")], "Read a bounded semantic DOM snapshot from the selected browser backend."),
     cmd("browser.query", &[req("pane"), req("target"), opt("timeout_ms")], "Find bounded elements by CSS, role/name, label, text, test_id or snapshot ref."),
     cmd("browser.inspect", &[req("pane"), req("target"), opt("include_attributes")], "Inspect an element without exposing password values."),
     cmd("browser.click", &[req("pane"), req("target"), opt("timeout_ms"), opt("wait_until")], "Click an element using the selected native browser backend; risky or uncertain actions require native approval."),
@@ -59,10 +59,10 @@ pub const COMMANDS: &[Command] = &[
     cmd("browser.fill", &[req("pane"), req("target"), req("value"), opt("timeout_ms")], "Focus, select and enter text; sensitive fields require native approval."),
     cmd("browser.type", &[req("pane"), req("target"), req("text"), opt("timeout_ms")], "Focus and type without clearing an editable field."),
     cmd("browser.press", &[req("pane"), req("key"), opt("target")], "Dispatch a browser key; a key that could submit a form requires approval."),
-    cmd("browser.scroll", &[req("pane"), req("delta_y"), opt("delta_x"), opt("x"), opt("y")], "Scroll the Chrome page through its CDP input channel."),
+    cmd("browser.scroll", &[req("pane"), req("delta_y"), opt("delta_x"), opt("x"), opt("y")], "Scroll the selected browser pane using native Chrome CDP or WKWebView wheel input."),
     cmd("browser.wait", &[req("pane"), req("condition"), opt("timeout_ms")], "Wait for a page URL, visible selector or text condition with timeout."),
     cmd("browser.eval", &[req("pane"), req("expression"), opt("timeout_ms")], "Evaluate page JavaScript only after native user approval."),
-    cmd("browser.screenshot", &[req("pane"), opt("scope")], "Capture a PNG screenshot from Chrome to a private local path."),
+    cmd("browser.screenshot", &[req("pane"), opt("scope")], "Capture a native-backend PNG screenshot to a private local path."),
     cmd("browser.result", &[req("request_id"), opt("wait_ms")], "Poll an accepted Agent operation, including native approval state."),
     cmd("browser.cancel", &[req("request_id")], "Cancel or discard a browser request; already dispatched input cannot be undone."),
     cmd("browser.open", &[opt("url"), opt("name"), opt("space"), opt("focus"), opt("engine")],
@@ -165,7 +165,16 @@ pub fn validate_args(c: &Command, args: &Value) -> Result<(), String> {
                 return Err(format!("{}: unknown argument(s): {}; valid arguments: {valid}", c.name, unknown.join(", ")));
             }
             for (key, value) in args {
-                if matches!(key.as_str(), "id" | "pane" | "space" | "terminal" | "target") && !value.is_string() && !value.is_null() {
+                // Browser locator targets are structured JSON objects (CSS, role,
+                // text, etc.), unlike the pane ID string used by pane.swap.
+                // Both CLI and MCP must enforce the same contract before dispatch.
+                if key == "target" && c.name.starts_with("browser.") {
+                    if !value.is_object() && !value.is_null() {
+                        return Err(format!("{}: browser target must be an object (or null to omit it)", c.name));
+                    }
+                } else if matches!(key.as_str(), "id" | "pane" | "space" | "terminal" | "target")
+                    && !value.is_string() && !value.is_null()
+                {
                     return Err(format!("{}: argument {key} must be a string (or null to omit it)", c.name));
                 }
             }
@@ -219,7 +228,14 @@ mod tests {
             assert!(validate_args(c, &Value::Null).is_ok());
             assert!(validate_args(c, &json!({})).is_ok());
             assert!(validate_args(c, &json!(["target"])).is_err());
-            let args: serde_json::Map<String, Value> = c.args.iter().map(|a| (a.name.into(), json!("target"))).collect();
+            let args: serde_json::Map<String, Value> = c.args.iter().map(|a| {
+                let value = if c.name.starts_with("browser.") && a.name == "target" {
+                    json!({"css":"#safe"})
+                } else {
+                    json!("target")
+                };
+                (a.name.into(), value)
+            }).collect();
             assert!(validate_args(c, &Value::Object(args)).is_ok());
         }
         let close = find("space.close").unwrap();
@@ -241,6 +257,24 @@ mod tests {
                 assert!(validate_args(c, &json!({arg: value})).is_ok());
             }
         }
+    }
+
+    #[test]
+    fn browser_locator_contract_accepts_objects_on_both_cli_and_mcp_paths() {
+        for name in ["browser.query", "browser.inspect", "browser.click",
+                     "browser.fill", "browser.type", "browser.press"] {
+            let command = find(name).unwrap();
+            assert!(validate_args(command, &json!({"pane":"p1","target":{"css":"#safe"}})).is_ok(),
+                "{name} must accept a structured locator");
+            for invalid in [json!("#safe"), json!(17), json!(true), json!([])] {
+                let error = validate_args(command, &json!({"pane":"p1","target":invalid})).unwrap_err();
+                assert!(error.contains("browser target must be an object"), "{name}: {error}");
+            }
+        }
+        let swap = find("pane.swap").unwrap();
+        assert!(validate_args(swap, &json!({"target":"other-pane"})).is_ok());
+        assert!(validate_args(swap, &json!({"target":{"css":"#unsafe"}})).is_err());
+        assert_eq!(missing(find("browser.query").unwrap(), &json!({"pane":"p1"})),Some("target"));
     }
 
     #[test]

@@ -4938,7 +4938,11 @@ impl AppWindow {
             return self.fail("TOO_MANY_REQUESTS: collect browser.result for completed operations");
         }
         let session = if let Some(chrome) = self.chrome_views.get(&pane) {
-            let Some(session) = chrome.read(cx).session() else {
+            let view = chrome.read(cx);
+            if let Some(error) = view.startup_error() {
+                return self.fail(format!("CHROME_START_FAILED: {error}"));
+            }
+            let Some(session) = view.session() else {
                 return self.fail("BROWSER_NOT_READY: Chrome is still starting; retry after a moment");
             };
             Some(session)
@@ -4982,6 +4986,10 @@ impl AppWindow {
             } else {
                 job.status = BrowserJobStatus::Finished(result);
             }
+            // A WKWebView is a native child NSView. When it remains visible it
+            // sits above the GPUI approval overlay and steals real pointer input.
+            // Hide it only while an approval is pending, then restore the pane.
+            self.sync_wk_approval_visibility(cx);
             cx.notify();
         }
     }
@@ -5123,7 +5131,7 @@ impl AppWindow {
             }).await;
             let _ = this.update(cx, |this, cx| {
                 let result: Result<Value, String> =
-                    if matches!(action.as_str(), "browser.click" | "browser.click_at" | "browser.press" | "browser.fill" | "browser.type") {
+                    if matches!(action.as_str(), "browser.click" | "browser.click_at" | "browser.press" | "browser.fill" | "browser.type" | "browser.scroll") {
                         result.and_then(|coordinates| {
                             if cancel.load(std::sync::atomic::Ordering::Acquire) {
                                 return Err("CANCELLED".into());
@@ -5139,6 +5147,12 @@ impl AppWindow {
                                 let key=coordinates["key"].as_str()
                                     .ok_or("INVALID_ARGUMENT: missing WK key")?;
                                 view.update(cx, |view, _| crate::wk_input::press_key(view, key))?;
+                            } else if action == "browser.scroll" {
+                                let x=coordinates["x"].as_f64().ok_or("INVALID_ARGUMENT: missing WK wheel X")?;
+                                let y=coordinates["y"].as_f64().ok_or("INVALID_ARGUMENT: missing WK wheel Y")?;
+                                let dx=coordinates["delta_x"].as_f64().ok_or("INVALID_ARGUMENT: missing WK wheel delta_x")?;
+                                let dy=coordinates["delta_y"].as_f64().ok_or("INVALID_ARGUMENT: missing WK wheel delta_y")?;
+                                view.update(cx, |view, _| crate::wk_input::scroll_at(view, x, y, dx, dy))?;
                             } else {
                                 let x=coordinates["x"].as_f64().ok_or("INVALID_ARGUMENT: missing native click X")?;
                                 let y=coordinates["y"].as_f64().ok_or("INVALID_ARGUMENT: missing native click Y")?;
@@ -5204,6 +5218,7 @@ impl AppWindow {
             return self.fail("REQUEST_NOT_FOUND: browser operation not found");
         };
         job.cancelled.store(true, std::sync::atomic::Ordering::Release);
+        self.sync_wk_approval_visibility(cx);
         self.answer(Ok(json!({
             "api_version":crate::browser_backend::API_VERSION,"ok":true,
             "status":"completed","request_id":id,"pane":job.pane,
@@ -5218,11 +5233,53 @@ impl AppWindow {
         let Some(job) = self.browser_jobs.get_mut(id) else { return };
         if !matches!(job.status, BrowserJobStatus::ApprovalRequired(_)) { return }
         if allow {
-            self.browser_dispatch_job(id.to_owned(), true, cx);
+            job.status = BrowserJobStatus::Running;
         } else {
             job.status = BrowserJobStatus::Finished(Err("PERMISSION_DENIED: the person declined the browser action".into()));
         }
+        // Restore the actual child view *before* dispatching approved native
+        // pointer/keyboard events. Denial restores it without any page action.
+        self.sync_wk_approval_visibility(cx);
+        if allow {
+            self.browser_dispatch_job(id.to_owned(), true, cx);
+        }
         cx.notify();
+    }
+
+    /// Panes whose WKWebView must stay hidden while a GPUI approval modal is
+    /// up: the native child view would otherwise cover the modal and eat the
+    /// pointer. A job without a CDP session is a WKWebView job.
+    #[cfg(target_os = "macos")]
+    fn wk_panes_awaiting_approval(&self) -> HashSet<String> {
+        self.browser_jobs.values()
+            .filter(|job| job.session.is_none()
+                && matches!(job.status, BrowserJobStatus::ApprovalRequired(_)))
+            .map(|job| job.pane.clone())
+            .collect()
+    }
+
+    /// Native WKWebView is an AppKit child NSView painted above GPUI content.
+    /// Temporarily hide the child during a GPUI approval modal, otherwise the
+    /// modal can look visible yet be impossible to click (or be covered).
+    /// Do not show a pane belonging to an inactive tab when the modal ends.
+    #[cfg(target_os = "macos")]
+    fn sync_wk_approval_visibility(&mut self, cx: &mut Context<Self>) {
+        let blocked = self.wk_panes_awaiting_approval();
+        let active: HashSet<String> = if self.shows_tab() {
+            self.model.active_tab().map(|tab| tab.shown().visible_blocks()
+                .into_iter().filter(|node|
+                    matches!(node.content(), Some(Content::Mod { name, .. }) if crate::browser::is_browser(name)))
+                .map(|node| node.id.clone()).collect()).unwrap_or_default()
+        } else {
+            HashSet::new()
+        };
+        for (pane, view) in &self.browser_views {
+            let show = active.contains(pane) && !blocked.contains(pane);
+            view.update(cx, |view, _| {
+                if show && !view.visible() { view.show(); }
+                if !show && view.visible() { view.hide(); }
+            });
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -5317,6 +5374,7 @@ impl AppWindow {
             keep
         });
         self.browser_errors.retain(|id, _| owned.contains_key(id));
+        let blocked_wk = self.wk_panes_awaiting_approval();
         for (id, desired) in owned {
             let pane_visible = visible.contains(&id);
             let (engine, url) = match desired {
@@ -5353,7 +5411,7 @@ impl AppWindow {
                 }
                 continue;
             }
-            if !pane_visible {
+            if !pane_visible || blocked_wk.contains(&id) {
                 if let Some(view) = self.browser_views.get(&id) {
                     view.update(cx, |v, _| { if v.visible() { v.hide(); } });
                 }

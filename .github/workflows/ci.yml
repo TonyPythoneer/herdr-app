@@ -6,7 +6,9 @@ name: ci
 
 on:
   push:
-    branches: [master]
+    # The stable fork release gate evaluates check-runs on the exact maintained
+    # integration SHA. PR checks and master-only CI cannot satisfy that gate.
+    branches: [master, feature/native-browser-tabs]
   # No paths-ignore here: CI is required to merge, so every PR needs it.
   pull_request:
 
