@@ -281,11 +281,11 @@ mod tests {
     }
     #[test]
     fn wk_native_scroll_uses_bounded_pixel_deltas_and_viewport_coordinates(){
-        let script=script("browser.scroll",&json!({"delta_y":200.0}),false).unwrap();
-        assert!(script.contains("innerWidth/2"));
-        assert!(script.contains("innerHeight/2"));
-        assert!(script.contains("delta_y:200"));
-        assert!(script.contains("native:true"));
+        let generated=script("browser.scroll",&json!({"delta_y":200.0}),false).unwrap();
+        assert!(generated.contains("innerWidth/2"));
+        assert!(generated.contains("innerHeight/2"));
+        assert!(generated.contains("delta_y:200"));
+        assert!(generated.contains("native:true"));
         for args in [
             json!({}),json!({"delta_y":0}),json!({"delta_y":9000}),
             json!({"delta_y":true}),json!({"delta_y":200,"x":-50_000}),
