@@ -196,11 +196,11 @@ if(!['INPUT','TEXTAREA'].includes(el.tagName)&&!el.isContentEditable)return {err
 el.focus();
 if(typeof el.select==='function')el.select();
 else if(el.isContentEditable)document.getSelection().selectAllChildren(el);
-return {ready:true,sensitive:el.type==='password'||(el.autocomplete||'').startsWith('cc-')};
+return {ready:true,sensitive:sensitive(el)};
 "#}else{r#"
 if(!visible(el)||el.disabled||el.readOnly)return {error:'ELEMENT_NOT_ACTIONABLE'};
 if(!['INPUT','TEXTAREA'].includes(el.tagName)&&!el.isContentEditable)return {error:'NOT_EDITABLE'};
-el.focus();return {ready:true,sensitive:el.type==='password'||(el.autocomplete||'').startsWith('cc-')};"#};
+el.focus();return {ready:true,sensitive:sensitive(el)};"#};
             let info=unique(session,loc,expression)?;
             if info["sensitive"]==true && !approved {return Err("APPROVAL_REQUIRED: entering sensitive credentials/payment data".into())}
             if cancelled.load(Ordering::Acquire){return Err("CANCELLED".into())}
