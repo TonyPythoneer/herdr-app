@@ -27,13 +27,13 @@ PAGE = """<!doctype html><html><head><title>Packaged Browser E2E</title>
 <input id="field" aria-label="Test Field" type="text">
 <p id="status">untouched</p>
 <script>
-window.__deleted=false;
+window.__deleted=false;window.__deleteCount=0;
 document.querySelector('#safe').addEventListener('click',()=> {
   document.querySelector('#status').textContent='clicked';
 });
 document.querySelector('#danger').addEventListener('click',()=> {
-  window.__deleted=true;
-  document.querySelector('#status').textContent='DELETED';
+  window.__deleted=true;window.__deleteCount++;
+  document.querySelector('#status').textContent='DELETED-'+window.__deleteCount;
 });
 </script>
 </body></html>"""
@@ -146,7 +146,53 @@ def check_mcp(exe, env, pane):
     print("PACKAGED_MCP_VERIFIED: tools/list and socket-backed browser.list, no approve tool", flush=True)
 
 
-def run(app, core_bin, engine):
+def native_gui_decide(exe, pid, choice):
+    # Separate OS-level GUI automation: never an Agent/CLI/MCP approval path.
+    time.sleep(0.5)
+    reply = subprocess.run([str(exe), str(pid), choice], text=True,
+                           capture_output=True, timeout=20)
+    if reply.returncode or "GPUI_NATIVE_APPROVAL_INPUT:" not in reply.stdout:
+        raise AssertionError("real OS approval input failed: {} {}".format(
+            reply.stdout[-500:], reply.stderr[-500:]))
+    print(reply.stdout.strip(), flush=True)
+
+
+def wait_native_decision(exe, env, request_id, *, permitted):
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        result = action(exe, env, "browser.result",
+                        {"request_id": request_id}, allow_error=True)
+        if result.get("status") == "completed":
+            assert permitted and result.get("ok") is True, result
+            return result
+        if result.get("status") == "failed":
+            assert not permitted and "PERMISSION_DENIED" in str(result.get("error")), result
+            return result
+        time.sleep(0.2)
+    raise AssertionError("native approval UI never resolved request " + request_id)
+
+
+def test_native_gpui_approval(exe, env, pane, pid, driver):
+    request = browser_action(exe, env, "browser.click", pane,
+                             {"target": {"css": "#danger"}})
+    assert request.get("approval_required"), request
+    native_gui_decide(driver, pid, "approve")
+    wait_native_decision(exe, env, request["request_id"], permitted=True)
+    inspected = browser_action(exe, env, "browser.inspect", pane,
+                               {"target": {"css": "#status"}})
+    assert inspected["result"]["elements"][0]["text"] == "DELETED-1", inspected
+    request = browser_action(exe, env, "browser.click", pane,
+                             {"target": {"css": "#danger"}})
+    assert request.get("approval_required"), request
+    native_gui_decide(driver, pid, "deny")
+    wait_native_decision(exe, env, request["request_id"], permitted=False)
+    inspected = browser_action(exe, env, "browser.inspect", pane,
+                               {"target": {"css": "#status"}})
+    assert inspected["result"]["elements"][0]["text"] == "DELETED-1", inspected
+    print("PACKAGED_GPUI_APPROVAL_E2E_VERIFIED: real native approve and deny with DOM postconditions", flush=True)
+
+
+def run(app, core_bin, engine, approval_driver=None):
     assert app.name == "Herdr", "expected the packaged Contents/MacOS/Herdr binary"
     assert app.is_file(), "packaged application executable missing"
     version = subprocess.run([str(app), "--version"], text=True,
@@ -243,6 +289,8 @@ def run(app, core_bin, engine):
                     assert action(app, env, "browser.result",
                                   {"request_id": req_id}, allow_error=True).get("error")
                     check_mcp(app, env, pane)
+                    if approval_driver is not None:
+                        test_native_gpui_approval(app, env, pane, child.pid, approval_driver)
                     closed = action(app, env, "tab.close",
                                     {"id": tab["tab"], "confirmed": True})
                     print("PACKAGED_BROWSER_E2E_VERIFIED: {} complete".format(engine), flush=True)
@@ -267,5 +315,7 @@ if __name__ == "__main__":
     parser.add_argument("--app", type=Path, required=True)
     parser.add_argument("--core", type=Path, required=True)
     parser.add_argument("--engine", choices=["wkwebview", "chrome-cdp"], required=True)
+    parser.add_argument("--approval-driver", type=Path)
     args = parser.parse_args()
-    run(args.app.resolve(), args.core.resolve(), args.engine)
+    run(args.app.resolve(), args.core.resolve(), args.engine,
+        args.approval_driver.resolve() if args.approval_driver else None)
