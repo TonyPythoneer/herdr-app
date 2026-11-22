@@ -24,6 +24,15 @@ const EVERY: Duration = Duration::from_secs(60 * 60);
 /// After a failed check or download (offline, a damaged file).
 const RETRY: Duration = Duration::from_secs(30 * 60);
 
+// App releases for this fork must never come from releases.herdr.dev.
+// herdr-core continues using the original releases() source.
+const FORK_APP_FEED: &str = "https://github.com/TonyPythoneer/herdr-webview/releases/latest/download/latest.json";
+const FORK_CHECK_INTERVAL: u64 = 7 * 24 * 60 * 60;
+const FORK_CHECK_RETRY: u64 = 24 * 60 * 60;
+fn is_webview_fork() -> bool {
+    cfg!(target_os = "macos") && option_env!("HERDR_BROWSER_FORK").is_some()
+}
+
 /// Where this app is installed: the folder (Linux) or bundle (macOS) an
 /// update replaces. Read once: after a swap this process's own file is gone.
 fn root() -> Option<PathBuf> {
@@ -101,6 +110,107 @@ static WAKE: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
 /// The checker runs (a release, or pointed at a test server), and is looking right now.
 static RUNNING: AtomicBool = AtomicBool::new(false);
 static CHECKING: AtomicBool = AtomicBool::new(false);
+static FORK_MANUAL: AtomicBool = AtomicBool::new(false);
+static FORK_WAKE: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
+
+#[derive(Clone, Copy, Default, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+struct ForkCheckState {
+    last_successful_app_update_check_at: Option<u64>,
+    last_attempt_at: Option<u64>,
+}
+
+fn fork_state_path() -> PathBuf {
+    crate::mods::app_dir().join("webview-app-update-check.json")
+}
+
+fn load_fork_state(path: &Path) -> ForkCheckState {
+    std::fs::read(path).ok().and_then(|data| serde_json::from_slice(&data).ok())
+        .unwrap_or_default()
+}
+
+fn save_fork_state(path: &Path, state: ForkCheckState) -> Result<(), String> {
+    use std::io::Write as _;
+    let parent = path.parent().ok_or("missing state directory")?;
+    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
+    #[cfg(unix)]
+    let mut file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600)
+            .open(&tmp).map_err(|e| e.to_string())?
+    };
+    #[cfg(not(unix))]
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true)
+        .open(&tmp).map_err(|e| e.to_string())?;
+    let data = serde_json::to_vec(&state).map_err(|e| e.to_string())?;
+    let result = (|| -> std::io::Result<()> {
+        file.write_all(&data)?;
+        file.sync_all()?;
+        std::fs::rename(&tmp, path)
+    })();
+    if result.is_err() { let _ = std::fs::remove_file(tmp); }
+    result.map_err(|e| e.to_string())
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .map(|time| time.as_secs()).unwrap_or(0)
+}
+
+/// A successful check schedules the next check seven days later. Failed/
+/// offline attempts do NOT change that timestamp; they only add a 24h
+/// backoff. On first launch or after missing multiple weeks, run once.
+fn fork_check_delay(state: ForkCheckState, now: u64) -> Duration {
+    let normal_due = state.last_successful_app_update_check_at
+        .map(|t| t.saturating_add(FORK_CHECK_INTERVAL)).unwrap_or(0);
+    let retry_due = state.last_attempt_at
+        .map(|t| t.saturating_add(FORK_CHECK_RETRY)).unwrap_or(0);
+    Duration::from_secs(normal_due.max(retry_due).saturating_sub(now))
+}
+
+fn fork_sleep(duration: Duration) {
+    let signal = FORK_WAKE.0.lock().unwrap();
+    let (mut signal, _) = FORK_WAKE.1.wait_timeout_while(signal, duration, |s| !*s).unwrap();
+    *signal = false;
+}
+
+fn start_fork_app_check(root: PathBuf) {
+    std::thread::spawn(move || {
+        fork_sleep(Duration::from_secs(10));
+        let path = fork_state_path();
+        let mut state = load_fork_state(&path);
+        loop {
+            let manual = FORK_MANUAL.swap(false, Ordering::AcqRel);
+            let delay = if manual { Duration::ZERO } else { fork_check_delay(state, unix_now()) };
+            if delay > Duration::ZERO {
+                fork_sleep(delay);
+                continue;
+            }
+            CHECKING.store(true, Ordering::Relaxed);
+            state.last_attempt_at = Some(unix_now());
+            if let Err(e) = save_fork_state(&path, state) {
+                tracing::warn!("cannot persist WebView update attempt: {e}");
+            }
+            match check(&root) {
+                Ok(found) => {
+                    if let Some(version) = found { *READY.lock().unwrap() = Some(version); }
+                    let now = unix_now();
+                    state.last_successful_app_update_check_at = Some(now);
+                    *CHECKED.lock().unwrap() = Some(now);
+                }
+                Err(e) => {
+                    tracing::warn!("WebView app update check failed: {e}");
+                    crate::telemetry::count("app_update_failed");
+                }
+            }
+            if let Err(e) = save_fork_state(&path, state) {
+                tracing::warn!("cannot persist WebView update schedule: {e}");
+            }
+            CHECKING.store(false, Ordering::Relaxed);
+        }
+    });
+}
+
 
 pub fn core() -> CoreInfo {
     CORE.lock().unwrap().clone()
@@ -122,10 +232,10 @@ pub fn set_core(version: Option<String>, managed: Option<String>) {
 }
 
 fn checks_app() -> Option<PathBuf> {
-    // A forked macOS browser release must never replace itself with an official Herdr binary.
-    // Core updates remain enabled; only automatic desktop app replacement is disabled.
-    root().filter(|_| option_env!("HERDR_BROWSER_FORK").is_none()
-        && (option_env!("HERDR_APP_RELEASE").is_some() || std::env::var_os("HERDR_RELEASES_URL").is_some()))
+    // A fork build enables app updates only when it is a packaged release.
+    // HERDR_RELEASES_URL remains an upstream-core/test override, never the fork app feed.
+    root().filter(|_| option_env!("HERDR_APP_RELEASE").is_some()
+        || (!is_webview_fork() && std::env::var_os("HERDR_RELEASES_URL").is_some()))
 }
 
 /// A release build checks the core; a source build only when pointed at a test release server.
@@ -136,7 +246,14 @@ fn checks_core() -> bool {
 /// For the settings screen: both programs, what's waiting, when we last looked.
 pub fn status() -> serde_json::Value {
     serde_json::json!({
-        "app": { "version": env!("CARGO_PKG_VERSION"), "ready": ready(), "updates": checks_app().is_some() },
+        "app": {
+            "version": env!("CARGO_PKG_VERSION"),
+            "ready": ready(),
+            "updates": checks_app().is_some(),
+            "last_successful_app_update_check_at": if is_webview_fork() {
+                load_fork_state(&fork_state_path()).last_successful_app_update_check_at
+            } else { None },
+        },
         "notes": crate::update_notes::notes(ready().as_deref()),
         "core": core(),
         "checked": *CHECKED.lock().unwrap(),
@@ -148,6 +265,11 @@ pub fn status() -> serde_json::Value {
 pub fn check_now() {
     if RUNNING.load(Ordering::Relaxed) {
         CHECKING.store(true, Ordering::Relaxed);
+    }
+    if is_webview_fork() {
+        FORK_MANUAL.store(true, Ordering::Release);
+        *FORK_WAKE.0.lock().unwrap() = true;
+        FORK_WAKE.1.notify_all();
     }
     *WAKE.0.lock().unwrap() = true;
     WAKE.1.notify_all();
@@ -168,6 +290,13 @@ pub fn start() {
         return;
     }
     RUNNING.store(true, Ordering::Relaxed);
+    // Use two independent workers: the fork app checks GitHub once every
+    // seven days, while the core continues using upstream's hourly policy.
+    let app = if is_webview_fork() {
+        if let Some(root) = app { start_fork_app_check(root); }
+        None
+    } else { app };
+    if app.is_none() && !core { return; }
     CHECKING.store(true, Ordering::Relaxed);
     std::thread::spawn(move || {
         sleep(Duration::from_secs(10));
@@ -268,19 +397,52 @@ pub fn update_core() {
 
 /// Downloads the latest release if it's newer. Ok(Some): a version is ready.
 fn check(root: &Path) -> Result<Option<String>, String> {
-    check_from(root, &releases())
+    if is_webview_fork() {
+        check_from_manifest(root, FORK_APP_FEED, None, true)
+    } else {
+        check_from(root, &releases())
+    }
 }
 
 fn check_from(root: &Path, releases: &str) -> Result<Option<String>, String> {
-    let path = "app/latest.json";
-    let text = curl_text(&format!("{releases}/{path}"))?;
-    let manifest: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("{path}: {e}"))?;
-    let version = manifest["version"].as_str().ok_or(format!("{path}: no version"))?;
+    check_from_manifest(root, &format!("{releases}/app/latest.json"), Some(releases), false)
+}
+
+fn validate_fork_archive(version: &str, url: &str, sha: &str) -> Result<(), String> {
+    let Some((base, number)) = version.split_once("-webview.") else {
+        return Err("FORK_MANIFEST_INVALID: release must use the webview version suffix".into());
+    };
+    if base.split('.').count() != 3
+        || !base.split('.').all(|part| !part.is_empty() && part.bytes().all(|v| v.is_ascii_digit()))
+        || number.is_empty() || !number.bytes().all(|v| v.is_ascii_digit())
+    {
+        return Err("FORK_MANIFEST_INVALID: malformed webview SemVer".into());
+    }
+    if sha.len() != 64 || !sha.bytes().all(|v| v.is_ascii_hexdigit()) {
+        return Err("FORK_MANIFEST_INVALID: invalid SHA-256".into());
+    }
+    let parsed = url::Url::parse(url).map_err(|_| "FORK_MANIFEST_INVALID: invalid archive URL")?;
+    if parsed.scheme() != "https" || parsed.host_str() != Some("github.com")
+        || parsed.port().is_some() || !parsed.username().is_empty()
+        || parsed.password().is_some() || parsed.query().is_some() || parsed.fragment().is_some()
+        || parsed.path() != format!("/TonyPythoneer/herdr-webview/releases/download/v{version}/herdr-app-macos-aarch64.tar.gz")
+    {
+        return Err("FORK_MANIFEST_INVALID: archive must come from this fork's versioned GitHub release".into());
+    }
+    Ok(())
+}
+
+fn check_from_manifest(root: &Path, manifest_url: &str, releases: Option<&str>, fork: bool) -> Result<Option<String>, String> {
+    let text = curl_text(manifest_url)?;
+    let manifest: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("app/latest.json: {e}"))?;
+    let version = manifest["version"].as_str().ok_or("app/latest.json: no version")?;
     if !newer(version, env!("CARGO_PKG_VERSION")) {
         return Ok(None);
     }
-    // Notes are optional: a missing feed must never hold up the update.
-    if !crate::update_notes::has(version)
+    // Only upstream releases use the upstream notes feed; never request it
+    // for a fork-only app version.
+    if let Some(releases) = releases
+        && !crate::update_notes::has(version)
         && let Ok(text) = curl_text(&format!("{releases}/app/{version}/changelog.md"))
     {
         crate::update_notes::cache(&text);
@@ -291,8 +453,9 @@ fn check_from(root: &Path, releases: &str) -> Result<Option<String>, String> {
     }
     let entry = &manifest["targets"][target()];
     let (Some(url), Some(sha)) = (entry["url"].as_str(), entry["sha256"].as_str()) else {
-        return Ok(None);
+        return if fork { Err("FORK_MANIFEST_INVALID: missing target/URL/checksum".into()) } else { Ok(None) };
     };
+    if fork { validate_fork_archive(version, url, sha)?; }
     tracing::info!("downloading Herdr {version}");
     let work = beside(root, ".download");
     let _ = std::fs::remove_dir_all(&work);
@@ -406,18 +569,37 @@ fn version_of(app: &Path) -> Option<String> {
 
 /// `a` is a later version than `b` (semver; `0.2.0-rc.1` comes before `0.2.0`).
 pub(crate) fn newer(a: &str, b: &str) -> bool {
-    fn parts(v: &str) -> (Vec<u64>, Option<&str>) {
-        let (core, pre) = v.trim_start_matches('v').split_once('-').map_or((v.trim_start_matches('v'), None), |(c, p)| (c, Some(p)));
-        (core.split('.').map(|n| n.parse().unwrap_or(0)).collect(), pre)
+    fn parse(v: &str) -> Option<([u64; 3], Option<Vec<&str>>)> {
+        let value = v.trim_start_matches('v').split('+').next()?;
+        let (base, pre) = value.split_once('-').map_or((value, None), |(v, p)| (v, Some(p)));
+        let parts = base.split('.').collect::<Vec<_>>();
+        if parts.len() != 3 { return None; }
+        let core = [parts[0].parse().ok()?, parts[1].parse().ok()?, parts[2].parse().ok()?];
+        let pre = pre.map(|p| p.split('.').collect::<Vec<_>>());
+        if pre.as_ref().is_some_and(|p| p.iter().any(|x| x.is_empty())) { return None; }
+        Some((core, pre))
     }
-    let ((ca, pa), (cb, pb)) = (parts(a), parts(b));
-    match ca.cmp(&cb) {
-        std::cmp::Ordering::Equal => match (pa, pb) {
+    fn compare_pre(a: &[&str], b: &[&str]) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        for (x, y) in a.iter().zip(b.iter()) {
+            let ord = match (x.parse::<u64>(), y.parse::<u64>()) {
+                (Ok(a), Ok(b)) => a.cmp(&b),
+                (Ok(_), Err(_)) => Ordering::Less,
+                (Err(_), Ok(_)) => Ordering::Greater,
+                _ => x.cmp(y),
+            };
+            if ord != Ordering::Equal { return ord; }
+        }
+        a.len().cmp(&b.len())
+    }
+    let (Some((av, ap)), Some((bv, bp))) = (parse(a), parse(b)) else { return false; };
+    match av.cmp(&bv) {
+        std::cmp::Ordering::Equal => match (ap, bp) {
             (None, Some(_)) => true,
-            (Some(x), Some(y)) => x > y,
+            (Some(a), Some(b)) => compare_pre(&a, &b).is_gt(),
             _ => false,
         },
-        o => o == std::cmp::Ordering::Greater,
+        ord => ord.is_gt(),
     }
 }
 
@@ -875,6 +1057,46 @@ mod tests {
     }
 
     #[test]
+    fn webview_schedule_is_persistent_with_catchup_and_offline_backoff() {
+        let mut state = ForkCheckState::default();
+        assert_eq!(fork_check_delay(state, 100), Duration::ZERO);
+        state.last_successful_app_update_check_at = Some(100);
+        state.last_attempt_at = Some(100);
+        assert_eq!(fork_check_delay(state, 100 + FORK_CHECK_INTERVAL - 1), Duration::from_secs(1));
+        assert_eq!(fork_check_delay(state, 100 + FORK_CHECK_INTERVAL), Duration::ZERO);
+        assert_eq!(fork_check_delay(state, 100 + 21 * 86400), Duration::ZERO);
+        state.last_attempt_at = Some(100 + FORK_CHECK_INTERVAL);
+        assert_eq!(fork_check_delay(state, 100 + FORK_CHECK_INTERVAL), Duration::from_secs(FORK_CHECK_RETRY));
+        assert_eq!(fork_check_delay(state, 100 + FORK_CHECK_INTERVAL + FORK_CHECK_RETRY), Duration::ZERO);
+        let dir = std::env::temp_dir().join(format!("herdr-fork-update-{}",std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.json");
+        save_fork_state(&path,state).unwrap();
+        assert_eq!(load_fork_state(&path),state);
+        assert_eq!(load_fork_state(&dir.join("absent.json")),ForkCheckState::default());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn fork_manifest_must_point_to_our_verified_github_asset() {
+        let version = "0.1.16-webview.10";
+        let url = format!("https://github.com/TonyPythoneer/herdr-webview/releases/download/v{version}/herdr-app-macos-aarch64.tar.gz");
+        let sha = "a".repeat(64);
+        assert!(validate_fork_archive(version, &url, &sha).is_ok());
+        for bad in [
+            url.replace("github.com", "github.com.evil.test"),
+            url.replace("TonyPythoneer", "other-owner"),
+            url.replace("https://", "http://"),
+            url.replace("v0.1.16", "v0.1.17"),
+            format!("{url}?download=1")
+        ] {
+            assert!(validate_fork_archive(version, &bad, &sha).is_err(), "{bad}");
+        }
+        assert!(validate_fork_archive("0.1.16", &url, &sha).is_err());
+        assert!(validate_fork_archive(version, &url, "not-a-digest").is_err());
+    }
+
+    #[test]
     fn versions_compare_like_semver() {
         assert!(newer("0.2.0", "0.1.9"));
         assert!(newer("0.10.0", "0.9.0"));
@@ -882,6 +1104,11 @@ mod tests {
         assert!(!newer("1.0.0-rc.1", "1.0.0"));
         assert!(!newer("0.1.0", "0.1.0"));
         assert!(!newer("0.0.9", "0.1.0"));
+        assert!(newer("0.1.16-webview.10", "0.1.16-webview.9"));
+        assert!(!newer("0.1.16-webview.9", "0.1.16-webview.10"));
+        assert!(!newer("0.1.16-webview.1", "0.1.16"));
+        assert!(newer("0.1.16-webview.2", "0.1.16-webview.1"));
+        assert!(!newer("invalid", "0.1.16"));
     }
 
     #[test]
