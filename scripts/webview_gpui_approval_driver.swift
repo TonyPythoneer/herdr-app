@@ -16,9 +16,13 @@ guard CommandLine.arguments.count == 3,
 let pid = pid_t(rawPID)
 let requested = CommandLine.arguments[2] == "approve" ? "Approve once" : "Deny"
 
-func attribute(_ element: AXUIElement, _ name: CFString) -> CFTypeRef? {
+func asCFString(_ value: String) -> CFString {
+    value.withCString { CFStringCreateWithCString(nil, $0, kCFStringEncodingUTF8)! }
+}
+
+func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
     var result: CFTypeRef?
-    return AXUIElementCopyAttributeValue(element, name, &result) == .success ? result : nil
+    return AXUIElementCopyAttributeValue(element, asCFString(name), &result) == .success ? result : nil
 }
 
 func textOf(_ element: AXUIElement) -> String {
@@ -61,7 +65,7 @@ func click(at point: CGPoint) -> Bool {
 // when exposed, exercises exactly the live on_click native GPUI callback.
 let app = AXUIElementCreateApplication(pid)
 if let element = locate(app, requested) {
-    if AXUIElementPerformAction(element, kAXPressAction) == .success {
+    if AXUIElementPerformAction(element, asCFString(kAXPressAction)) == .success {
         print("GPUI_NATIVE_APPROVAL_INPUT: AXPress \(requested)")
         exit(0)
     }
