@@ -4986,6 +4986,10 @@ impl AppWindow {
             } else {
                 job.status = BrowserJobStatus::Finished(result);
             }
+            // A WKWebView is a native child NSView. When it remains visible it
+            // sits above the GPUI approval overlay and steals real pointer input.
+            // Hide it only while an approval is pending, then restore the pane.
+            self.sync_wk_approval_visibility(cx);
             cx.notify();
         }
     }
@@ -5214,6 +5218,7 @@ impl AppWindow {
             return self.fail("REQUEST_NOT_FOUND: browser operation not found");
         };
         job.cancelled.store(true, std::sync::atomic::Ordering::Release);
+        self.sync_wk_approval_visibility(cx);
         self.answer(Ok(json!({
             "api_version":crate::browser_backend::API_VERSION,"ok":true,
             "status":"completed","request_id":id,"pane":job.pane,
@@ -5228,11 +5233,45 @@ impl AppWindow {
         let Some(job) = self.browser_jobs.get_mut(id) else { return };
         if !matches!(job.status, BrowserJobStatus::ApprovalRequired(_)) { return }
         if allow {
-            self.browser_dispatch_job(id.to_owned(), true, cx);
+            job.status = BrowserJobStatus::Running;
         } else {
             job.status = BrowserJobStatus::Finished(Err("PERMISSION_DENIED: the person declined the browser action".into()));
         }
+        // Restore the actual child view *before* dispatching approved native
+        // pointer/keyboard events. Denial restores it without any page action.
+        self.sync_wk_approval_visibility(cx);
+        if allow {
+            self.browser_dispatch_job(id.to_owned(), true, cx);
+        }
         cx.notify();
+    }
+
+    /// Native WKWebView is an AppKit child NSView painted above GPUI content.
+    /// Temporarily hide the child during a GPUI approval modal, otherwise the
+    /// modal can look visible yet be impossible to click (or be covered).
+    /// Do not show a pane belonging to an inactive tab when the modal ends.
+    #[cfg(target_os = "macos")]
+    fn sync_wk_approval_visibility(&mut self, cx: &mut Context<Self>) {
+        let blocked: HashSet<&str> = self.browser_jobs.values()
+            .filter(|job| job.session.is_none()
+                && matches!(job.status, BrowserJobStatus::ApprovalRequired(_)))
+            .map(|job| job.pane.as_str())
+            .collect();
+        let active: HashSet<String> = if self.shows_tab() {
+            self.model.active_tab().map(|tab| tab.shown().visible_blocks()
+                .into_iter().filter(|node|
+                    matches!(node.content(), Some(Content::Mod { name, .. }) if crate::browser::is_browser(name)))
+                .map(|node| node.id.clone()).collect()).unwrap_or_default()
+        } else {
+            HashSet::new()
+        };
+        for (pane, view) in &self.browser_views {
+            let show = active.contains(pane) && !blocked.contains(pane.as_str());
+            view.update(cx, |view, _| {
+                if show && !view.visible() { view.show(); }
+                if !show && view.visible() { view.hide(); }
+            });
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -5327,6 +5366,10 @@ impl AppWindow {
             keep
         });
         self.browser_errors.retain(|id, _| owned.contains_key(id));
+        let blocked_wk: HashSet<String> = self.browser_jobs.values()
+            .filter(|job| job.session.is_none()
+                && matches!(job.status, BrowserJobStatus::ApprovalRequired(_)))
+            .map(|job| job.pane.clone()).collect();
         for (id, desired) in owned {
             let pane_visible = visible.contains(&id);
             let (engine, url) = match desired {
@@ -5363,7 +5406,7 @@ impl AppWindow {
                 }
                 continue;
             }
-            if !pane_visible {
+            if !pane_visible || blocked_wk.contains(&id) {
                 if let Some(view) = self.browser_views.get(&id) {
                     view.update(cx, |v, _| { if v.visible() { v.hide(); } });
                 }
