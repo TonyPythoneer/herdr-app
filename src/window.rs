@@ -4938,7 +4938,11 @@ impl AppWindow {
             return self.fail("TOO_MANY_REQUESTS: collect browser.result for completed operations");
         }
         let session = if let Some(chrome) = self.chrome_views.get(&pane) {
-            let Some(session) = chrome.read(cx).session() else {
+            let view = chrome.read(cx);
+            if let Some(error) = view.startup_error() {
+                return self.fail(format!("CHROME_START_FAILED: {error}"));
+            }
+            let Some(session) = view.session() else {
                 return self.fail("BROWSER_NOT_READY: Chrome is still starting; retry after a moment");
             };
             Some(session)
