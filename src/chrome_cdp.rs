@@ -450,7 +450,7 @@ mod tests {
                     Ok((mut connection, _)) => {
                         let mut request = [0u8; 4096];
                         let _ = connection.read(&mut request);
-                        let body = "<html><head><title>Herdr fixture</title></head><body><button id='click' onclick=\"document.getElementById('state').textContent='clicked'\">Click</button><span id='state'>idle</span><input id='text'></body></html>";
+                        let body = "<html><head><title>Herdr fixture</title></head><body><button id='click' onclick=\"document.getElementById('state').textContent='clicked'\">Click</button><span id='state'>idle</span><input id='text'><form onsubmit=\"event.preventDefault();window.__submitted=true\"><button id='disguised-submit' type='submit'>Search</button></form><a id='destructive-link' href='/delete/account'>Search</a><script>window.__submitted=false</script></body></html>";
                         let _ = write!(connection, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
                     }
                     Err(_) => std::thread::sleep(Duration::from_millis(10)),
@@ -499,6 +499,25 @@ mod tests {
             &json!({"target":{"css":"button#click"}}), false, &cancelled)
             .expect_err("uncertain action must require native approval");
         assert!(error.starts_with("APPROVAL_REQUIRED"));
+        // The same native permission boundary must hold for all keyboard
+        // activation aliases. Return and Space used to bypass the Enter gate.
+        for key in ["Enter", "Return", "Space"] {
+            let error = crate::browser_api::run(&pane, "browser.press",
+                &json!({"key":key,"target":{"css":"#disguised-submit"}}), false, &cancelled)
+                .expect_err("a keyboard shortcut cannot approve its own submission");
+            assert!(error.starts_with("APPROVAL_REQUIRED"), "{key}: {error}");
+        }
+        assert_eq!(pane.eval("window.__submitted").unwrap(), false,
+            "denied native key paths must not submit the form");
+        // A label like 'Search' is not proof a button is safe: inspect its
+        // actual submit semantics, and reject destructive URLs behind labels.
+        for selector in ["#disguised-submit", "#destructive-link"] {
+            let error = crate::browser_api::run(&pane, "browser.click",
+                &json!({"target":{"css":selector}}), false, &cancelled)
+                .expect_err("disguised irreversible action must require native approval");
+            assert!(error.starts_with("APPROVAL_REQUIRED"), "{selector}: {error}");
+        }
+        assert_eq!(pane.eval("window.__submitted").unwrap(), false);
         assert_eq!(crate::browser_api::run(&pane, "browser.click",
             &json!({"target":{"css":"button#click"}}), true, &cancelled)
             .expect("native approved click")["clicked"], true);
