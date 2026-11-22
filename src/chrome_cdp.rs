@@ -239,8 +239,12 @@ impl Client {
         pane.command("Page.enable", json!({}))?;
         pane.command("Runtime.enable", json!({}))?;
         pane.resize(1024, 768)?;
-        pane.command("Page.startScreencast", json!({"format":"png","everyNthFrame":1}))?;
+        // Navigate before starting the high-volume PNG screencast. On packaged
+        // macOS builds, frame streaming can starve the CDP pipe reader and
+        // delay Page.navigate's response until the request times out.
+        // The native browser target is still exercised by the E2E gate.
         pane.navigate(&url)?;
+        pane.command("Page.startScreencast", json!({"format":"png","everyNthFrame":1}))?;
         Ok(pane)
     }
 }
