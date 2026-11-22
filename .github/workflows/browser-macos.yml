@@ -110,6 +110,8 @@ jobs:
             exit 1
           fi
           "$binary" --version
+      - name: Verify isolated Chrome cleanup safety
+        run: python3 -m unittest discover -s scripts -p 'test_webview_packaged_e2e_cleanup.py'
       - name: Rust unit and Chrome CDP integration tests
         env:
           HERDR_CHROME_E2E: "1"

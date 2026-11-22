@@ -6,6 +6,7 @@ its real control socket and MCP stdio adapter, and runs a loopback-only fixture.
 No production website, private Chrome profile or person's Herdr home is touched.
 """
 import argparse
+import signal
 import contextlib
 import errno
 import http.server
@@ -58,6 +59,86 @@ class Fixture(http.server.BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
         return
+
+
+def isolated_chrome_processes(listing, profile):
+    """Resolve only Chrome's *exact* test-profile CDP process tree.
+
+    No global pkill, no name-only matching, no person's normal Chrome.
+    Descendant PIDs are returned before their browser parent(s).
+    """
+    marker = "--user-data-dir=" + str(profile)
+    rows = {}
+    for line in listing.splitlines():
+        parts = line.strip().split(maxsplit=2)
+        if len(parts) != 3 or not parts[0].isdigit() or not parts[1].isdigit():
+            continue
+        pid, ppid = int(parts[0]), int(parts[1])
+        rows[pid] = (ppid, parts[2].split())
+    roots = {pid for pid, (_, argv) in rows.items()
+             if marker in argv and "--remote-debugging-pipe" in argv
+             and "--headless=new" in argv}
+    owned = set(roots)
+    while True:
+        children = {pid for pid, (ppid, _) in rows.items() if ppid in owned}
+        if children.issubset(owned):
+            break
+        owned.update(children)
+    return sorted(owned - roots) + sorted(roots)
+
+
+def stop_isolated_chrome(profile):
+    """Reap detached Chrome helpers before deleting this E2E's private profile.
+
+    SIGTERM of the packaged App is immediate: Rust Drop handlers do not run,
+    so the child Chrome and its renderers can still write to the profile.
+    """
+    if not profile.exists():
+        return
+    def process_listing():
+        return subprocess.run(["/bin/ps", "-axo", "pid=,ppid=,args="],
+                              text=True, capture_output=True, check=True,
+                              timeout=6).stdout
+
+    pids = isolated_chrome_processes(process_listing(), profile)
+    if not pids:
+        return
+    def send(pid, sig):
+        if pid == os.getpid() or pid == os.getppid() or pid <= 1:
+            raise AssertionError("refusing to signal protected E2E process")
+        try:
+            os.kill(pid, sig)
+        except ProcessLookupError:
+            pass
+    for pid in pids:
+        send(pid, signal.SIGTERM)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        current = {int(x.strip().split(maxsplit=1)[0])
+                   for x in process_listing().splitlines()
+                   if x.strip().split(maxsplit=1)[0].isdigit()}
+        if not any(pid in current for pid in pids):
+            break
+        time.sleep(0.15)
+    else:
+        for pid in pids:
+            send(pid, signal.SIGKILL)
+    # Let Chrome's remaining filesystem operations quiesce before rmtree.
+    time.sleep(0.25)
+
+
+def cleanup_test_home(tmp):
+    """Bounded retry for Chrome's asynchronous last profile writes on macOS."""
+    for attempt in range(20):
+        try:
+            shutil.rmtree(tmp)
+            return
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            if error.errno not in (errno.ENOTEMPTY, errno.EBUSY) or attempt == 19:
+                raise
+            time.sleep(0.2)
 
 
 def command(exe, env, *args, timeout=12):
@@ -393,6 +474,10 @@ def run(app, core_bin, engine, approval_driver=None):
             raise
         finally:
             server.shutdown()
+            server.server_close()
+            if engine == "chrome-cdp":
+                stop_isolated_chrome(config / "chrome-profile")
+                cleanup_test_home(tmp)
     print("PACKAGED_BROWSER_E2E_VERIFIED: {} complete".format(engine), flush=True)
 
 
