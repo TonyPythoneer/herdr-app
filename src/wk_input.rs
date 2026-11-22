@@ -2,6 +2,7 @@
 //! Synthetic DOM click() and dispatchEvent() are not substitutes for this.
 //! This module is intentionally NOT wired into Agent commands until a real
 //! macOS E2E verifies the website receives a trusted event.
+use objc2::MainThreadMarker;
 use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType, NSScreen};
 use objc2_core_foundation::CGPoint;
 use objc2_core_graphics::{CGEvent, CGScrollEventUnit};
@@ -204,7 +205,10 @@ pub fn scroll_at(view:&gpui_wry::WebView, css_x:f64, css_y:f64,
     let location=wk.convertPoint_toView(NSPoint::new(pt.x,pt.y),None);
     let rect=NSRect::new(location,NSSize::new(1.0,1.0));
     let screen_point=window.convertRectToScreen(rect).origin;
-    let primary=NSScreen::screens().firstObject()
+    let mtm=MainThreadMarker::new()
+        .ok_or("NATIVE_INPUT_FAILED: WK wheel requires the AppKit main thread")?;
+    let screens=NSScreen::screens(mtm);
+    let primary=screens.firstObject()
         .ok_or("NATIVE_INPUT_FAILED: main display unavailable")?;
     let primary_bounds=primary.frame();
     let global=CGPoint::new(screen_point.x,primary_bounds.size.height-screen_point.y);
