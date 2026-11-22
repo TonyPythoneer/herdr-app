@@ -122,6 +122,10 @@ jobs:
         env:
           HERDR_WK_NATIVE_SMOKE: "1"
         run: cargo test --locked --config 'profile.dev.package."*".opt-level=0' --test wk_native_pixels
+      - name: Proof of trusted native WKWebView input in a visible child window
+        env:
+          HERDR_WK_NATIVE_INPUT_E2E: "1"
+        run: cargo test --locked --config 'profile.dev.package."*".opt-level=0' --test wk_native_input
       - name: Build macOS app through upstream packaging
         env:
           HERDR_BROWSER_FORK: "1"
