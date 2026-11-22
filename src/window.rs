@@ -5015,6 +5015,7 @@ impl AppWindow {
                 return self.browser_finish_job(&id, approved, Err(error), cx);
             }
             cx.spawn(async move |this, cx| {
+                let screenshot_id = id.clone();
                 let result = cx.background_executor().spawn(async move {
                     if cancel.load(std::sync::atomic::Ordering::Acquire) {
                         return Err("CANCELLED".into());
@@ -5024,7 +5025,7 @@ impl AppWindow {
                     if cancel.load(std::sync::atomic::Ordering::Acquire) {
                         return Err("CANCELLED".into());
                     }
-                    crate::wk_native::encode_and_save(&tiff, &id)
+                    crate::wk_native::encode_and_save(&tiff, &screenshot_id)
                 }).await;
                 let _ = this.update(cx, |this, cx| this.browser_finish_job(&id, approved, result, cx));
             }).detach();
