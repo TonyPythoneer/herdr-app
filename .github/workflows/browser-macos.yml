@@ -121,11 +121,17 @@ jobs:
       - name: Real GPUI/WKWebView child snapshot pixels (native AppKit)
         env:
           HERDR_WK_NATIVE_SMOKE: "1"
-        run: cargo test --locked --config 'profile.dev.package."*".opt-level=0' --test wk_native_pixels
+        run: |
+          set -euo pipefail
+          cargo test --locked --config 'profile.dev.package."*".opt-level=0' --test wk_native_pixels 2>&1 | tee "$RUNNER_TEMP/wk-snapshot.log"
+          grep -Fq 'native WKWebView screenshot pixel test passed:' "$RUNNER_TEMP/wk-snapshot.log"
       - name: Proof of trusted native WKWebView input in a visible child window
         env:
           HERDR_WK_NATIVE_INPUT_E2E: "1"
-        run: cargo test --locked --config 'profile.dev.package."*".opt-level=0' --test wk_native_input
+        run: |
+          set -euo pipefail
+          cargo test --locked --config 'profile.dev.package."*".opt-level=0' --test wk_native_input 2>&1 | tee "$RUNNER_TEMP/wk-trusted-input.log"
+          grep -Fq 'WK_TRUSTED_INPUT_VERIFIED: native click had isTrusted=true' "$RUNNER_TEMP/wk-trusted-input.log"
       - name: Build macOS app through upstream packaging
         env:
           HERDR_BROWSER_FORK: "1"
