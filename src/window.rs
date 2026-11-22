@@ -5123,14 +5123,19 @@ impl AppWindow {
             }).await;
             let _ = this.update(cx, |this, cx| {
                 let result: Result<Value, String> =
-                    if matches!(action.as_str(), "browser.click" | "browser.click_at" | "browser.press") {
+                    if matches!(action.as_str(), "browser.click" | "browser.click_at" | "browser.press" | "browser.fill" | "browser.type") {
                         result.and_then(|coordinates| {
                             if cancel.load(std::sync::atomic::Ordering::Acquire) {
                                 return Err("CANCELLED".into());
                             }
                             let view=this.browser_views.get(&pane)
                                 .ok_or("BROWSER_NOT_READY: WKWebView was closed before native input")?;
-                            if action == "browser.press" {
+                            if matches!(action.as_str(), "browser.fill" | "browser.type") {
+                                let field=if action=="browser.fill"{"value"}else{"text"};
+                                let text=args.get(field).and_then(Value::as_str)
+                                    .ok_or("INVALID_ARGUMENT: missing native typing text")?;
+                                view.update(cx, |view, _| crate::wk_input::type_text(view, text))?;
+                            } else if action == "browser.press" {
                                 let key=coordinates["key"].as_str()
                                     .ok_or("INVALID_ARGUMENT: missing WK key")?;
                                 view.update(cx, |view, _| crate::wk_input::press_key(view, key))?;

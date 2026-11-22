@@ -99,6 +99,32 @@ return {{ok:true,result:{{x,y,native:true,document_id:current,label}}}};
             }
             format!("return {{ok:true,result:{{x:{x},y:{y},native:true}}}};")
         }
+        "browser.fill" | "browser.type" => {
+            let loc=args.get("target").and_then(Value::as_object)
+                .ok_or("INVALID_ARGUMENT: native text target must be a locator object")?;
+            if loc.len()!=1 || loc.get("css").and_then(Value::as_str).is_none_or(|s| s.is_empty()||s.len()>512) {
+                return Err("INVALID_ARGUMENT: native WK text target supports one CSS selector".into());
+            }
+            let key=if command=="browser.fill"{"value"}else{"text"};
+            let value=args.get(key).and_then(Value::as_str)
+                .ok_or("INVALID_ARGUMENT: missing text value")?;
+            if value.is_empty() || value.chars().count()>128
+               || !value.chars().all(|c| c.is_ascii_alphanumeric() || c==' ') {
+                return Err("UNSUPPORTED_TEXT: WK native text supports 1..128 ASCII letters, digits, spaces".into());
+            }
+            let select=if command=="browser.fill" {
+                "if(typeof el.select==='function')el.select();else if(el.isContentEditable)document.getSelection().selectAllChildren(el);"
+            } else { "" };
+            format!(r#"
+const els=select();if(els.length!==1)return {{ok:false,error:els.length===0?'LOCATOR_NOT_FOUND':'LOCATOR_AMBIGUOUS'}};
+const el=els[0];if(!visible(el)||el.disabled||el.readOnly)return {{ok:false,error:'ELEMENT_NOT_ACTIONABLE'}};
+if(!['INPUT','TEXTAREA'].includes(el.tagName)&&!el.isContentEditable)return {{ok:false,error:'NOT_EDITABLE'}};
+if((el.type==='password'||(el.autocomplete||'').startsWith('cc-'))&&!{approved})
+ return {{ok:false,error:'APPROVAL_REQUIRED: typing sensitive form values'}};
+el.focus();{select}
+return {{ok:true,result:{{native:true,text_ready:true}}}};
+"#)
+        }
         "browser.press" => {
             let key=args.get("key").and_then(Value::as_str)
                 .ok_or("INVALID_ARGUMENT: native WK key is required")?;
@@ -179,7 +205,7 @@ return {{ok:true,result:{{matched:!!matched,url:location.href}}}};
         }
         _ => return Err("UNSUPPORTED_ENGINE: WKWebView native input/screenshots are not yet implemented".into()),
     };
-    let target = if matches!(command, "browser.query" | "browser.inspect" | "browser.click" | "browser.press") {
+    let target = if matches!(command, "browser.query" | "browser.inspect" | "browser.click" | "browser.press" | "browser.fill" | "browser.type") {
         args["target"].clone()
     } else { Value::Null };
     Ok(format!(r#"(() => {{
@@ -257,6 +283,19 @@ mod tests {
         assert!(script("browser.click_at",&json!({"x":-1,"y":30}),true).is_err());
         assert!(parse_callback(r#"{"ok":false,"error":"APPROVAL_REQUIRED: confirm deletion"}"#)
             .unwrap_err().starts_with("APPROVAL_REQUIRED:"));
+    }
+    #[test]
+    fn native_text_entry_has_bounded_locator_and_never_evaluates_input_as_js() {
+        let fill=script("browser.fill",&json!({"target":{"css":"#field"},"value":"Hello World"}),false).unwrap();
+        assert!(fill.contains("el.select()"));
+        assert!(fill.contains("APPROVAL_REQUIRED: typing sensitive"));
+        assert!(!fill.contains("Hello World"), "native text must stay outside the page JS bridge");
+        assert!(script("browser.type",&json!({"target":{"css":"#field"},"text":"Ada"}),false)
+            .unwrap().contains("text_ready:true"));
+        for v in ["hello\nworld","中","!"] {
+            assert!(script("browser.fill",&json!({"target":{"css":"input"},"value":v}),false).is_err());
+        }
+        assert!(script("browser.fill",&json!({"target":{"role":"textbox"},"value":"Hello"}),false).is_err());
     }
     #[test]
     fn native_keypress_is_allowlisted_and_submission_requires_approval() {

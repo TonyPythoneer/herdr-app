@@ -114,9 +114,67 @@ pub fn press_key(view: &gpui_wry::WebView, key: &str) -> Result<(), String> {
     Ok(())
 }
 
+
+fn ascii_keycode(character: char) -> Result<(u16, bool), String> {
+    let lower=character.to_ascii_lowercase();
+    let code=match lower {
+        'a'=>0,'s'=>1,'d'=>2,'f'=>3,'h'=>4,'g'=>5,'z'=>6,
+        'x'=>7,'c'=>8,'v'=>9,'b'=>11,'q'=>12,'w'=>13,'e'=>14,
+        'r'=>15,'y'=>16,'t'=>17,
+        '1'=>18,'2'=>19,'3'=>20,'4'=>21,'6'=>22,'5'=>23,
+        '9'=>25,'7'=>26,'8'=>28,'0'=>29,
+        'o'=>31,'u'=>32,'i'=>34,'p'=>35,'l'=>37,'j'=>38,
+        'k'=>40,'n'=>45,'m'=>46,' '=>49,
+        _=>return Err("UNSUPPORTED_TEXT: WK native typing currently supports ASCII letters, digits and spaces only".into()),
+    };
+    Ok((code,character.is_ascii_uppercase()))
+}
+
+/// Native AppKit text entry into the already focused WKWebView input element.
+/// Strictly bounded to avoid hanging GPUI's main thread with huge events.
+/// The page, not this API, decides whether the user's typing changes its value.
+pub fn type_text(view: &gpui_wry::WebView, value: &str) -> Result<usize, String> {
+    if value.is_empty() || value.chars().count() > 128 {
+        return Err("INVALID_ARGUMENT: native WK text input must be 1..128 characters".into());
+    }
+    // Validate all characters before dispatching anything. Partial unsupported
+    // input must not be accidentally submitted to a production page.
+    let events = value.chars().map(|c| ascii_keycode(c).map(|(code,shift)|(c,code,shift)))
+        .collect::<Result<Vec<_>,_>>()?;
+    if !view.visible() { return Err("BROWSER_NOT_VISIBLE: native WK typing needs a visible pane".into()); }
+    let window=view.raw().webview().window().ok_or("BROWSER_NOT_READY: no WK native window")?;
+    if !window.isKeyWindow() { return Err("BROWSER_NOT_FOCUSED: WK typing requires active Herdr window".into()); }
+    let number=window.windowNumber();
+    let loc=NSPoint::new(0.0,0.0);
+    for (c,code,shift) in &events {
+        let character=c.to_string();
+        let unmodified=c.to_ascii_lowercase().to_string();
+        let chars=NSString::from_str(&character);
+        let ignored=NSString::from_str(&unmodified);
+        let flags=if *shift { NSEventModifierFlags::Shift } else { NSEventModifierFlags::empty() };
+        let make = |event_type| NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+            event_type,loc,flags,0.0,number,None,&chars,&ignored,false,*code
+        ).ok_or("NATIVE_INPUT_FAILED: cannot construct text keyboard event");
+        let down=make(NSEventType::KeyDown)?;
+        let up=make(NSEventType::KeyUp)?;
+        window.sendEvent(&down);
+        window.sendEvent(&up);
+    }
+    Ok(events.len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_ascii_text_mapping_is_strict_and_atomic() {
+        assert_eq!(ascii_keycode('h').unwrap(),(4,false));
+        assert_eq!(ascii_keycode('H').unwrap(),(4,true));
+        assert_eq!(ascii_keycode('1').unwrap(),(18,false));
+        for ch in ['\n','\t','中','!','\0'] {
+            assert!(ascii_keycode(ch).is_err());
+        }
+    }
     #[test]
     fn only_known_native_webkit_keys_are_dispatched() {
         assert_eq!(key_info("Tab").unwrap(), NativeKey { code:48, chars:"\t" });

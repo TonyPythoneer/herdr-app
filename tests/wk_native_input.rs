@@ -40,7 +40,10 @@ mod mac {
 <div id="status" style="position:absolute;top:120px">pending</div>
 <input id="field" aria-label="Field" style="position:absolute;top:175px;left:20px;width:120px;height:35px">
 <script>
-window.__pressed=false;window.__trusted=false;window.__keyTrusted=false;
+window.__pressed=false;window.__trusted=false;window.__keyTrusted=false;window.__textTrusted=false;
+document.getElementById('field').addEventListener('keydown',(e)=>{
+ if(e.key==='H' || e.key==='i')window.__textTrusted=e.isTrusted;
+});
 document.getElementById('field').addEventListener('keydown',(e)=>{
  if(e.key==='Tab')window.__keyTrusted=e.isTrusted;
 });
@@ -102,7 +105,23 @@ document.getElementById('trusted').addEventListener('click',(e)=>{
                     observed=evaluate(&web,"window.__keyTrusted===true",cx).await.unwrap_or_default();
                     if observed=="true" {
                         eprintln!("WK_TRUSTED_KEY_VERIFIED: AppKit keyDown had isTrusted=true");
-                        return Ok(());
+                        cx.update(|cx|web.update(cx,|v,_|wk_input::click_at(v,80.0,190.0)))
+                            .map_err(|e|format!("could not refocus text field: {e}"))?;
+                        cx.background_executor().timer(Duration::from_millis(100)).await;
+                        cx.update(|cx|web.update(cx,|v,_|wk_input::type_text(v,"Hi")))
+                            .map_err(|e|format!("could not type native text: {e}"))?;
+                        let mut result=String::new();
+                        for _ in 0..25 {
+                            result=evaluate(&web,
+                                "document.getElementById('field').value==='Hi' && window.__textTrusted===true",cx)
+                                .await.unwrap_or_default();
+                            if result=="true" {
+                                eprintln!("WK_TRUSTED_TEXT_VERIFIED: native AppKit text produced trusted keydown and input value");
+                                return Ok(());
+                            }
+                            cx.background_executor().timer(Duration::from_millis(100)).await;
+                        }
+                        return Err(format!("native WK text did not produce trusted input: {result}"));
                     }
                     cx.background_executor().timer(Duration::from_millis(100)).await;
                 }
