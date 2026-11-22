@@ -99,6 +99,26 @@ def await_job(exe, env, result, *, seconds=35):
     raise AssertionError("browser command stalled: {}".format(result))
 
 
+def wait_for_core_space(exe, env, home, *, seconds=40):
+    """Socket readiness precedes official herdr-core layout readiness on macOS.
+
+    Retry ONLY the known transient core-attachment error. Every other error
+    remains an immediate hard failure; no fake core or skipped app command.
+    """
+    deadline = time.monotonic() + seconds
+    last = None
+    while time.monotonic() < deadline:
+        result = action(exe, env, "space.new",
+                        {"name": "E2E", "folder": str(home)}, allow_error=True)
+        if result.get("space"):
+            return result
+        last = result.get("error", str(result))
+        if "layout is unavailable" not in last and "when it reconnects" not in last:
+            raise AssertionError("space.new failed nontransiently: {}".format(result))
+        time.sleep(0.5)
+    raise AssertionError("official herdr-core never provided a layout: {}".format(last))
+
+
 def browser_action(exe, env, name, pane, data=None, *, seconds=35):
     args = {"pane": pane, **(data or {})}
     request = action(exe, env, name, args)
@@ -247,7 +267,7 @@ def run(app, core_bin, engine, approval_driver=None):
                         time.sleep(0.7)
                     else:
                         raise AssertionError("packaged App did not start its CLI socket: {}".format(last))
-                    space = action(app, env, "space.new", {"name": "E2E", "folder": str(home)})
+                    space = wait_for_core_space(app, env, home)
                     assert space.get("space"), space
                     tab = action(app, env, "browser.open",
                                  {"url": url, "engine": engine, "name": "Native E2E"})
