@@ -8,6 +8,8 @@ on:
       - .github/workflows/adapter-auto-update-tests.yml
       - .github/workflows/browser-macos.yml
       - scripts/test_adapter_pipeline_contract.py
+      - scripts/webview_branch_protection.py
+      - scripts/test_webview_branch_protection.py
   workflow_dispatch:
 permissions:
   contents: read
@@ -23,3 +25,4 @@ jobs:
         run: |
           python3 -m unittest discover -s scripts -p 'test_adapter_update.py' -v
           python3 -m unittest discover -s scripts -p 'test_adapter_pipeline_contract.py' -v
+          python3 -m unittest discover -s scripts -p 'test_webview_branch_protection.py' -v

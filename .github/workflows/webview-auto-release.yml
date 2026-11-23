@@ -62,6 +62,19 @@ jobs:
           ref: ${{ steps.sha.outputs.sha }}
           path: integration
           persist-credentials: false
+      - name: Require protected Host master, release branch and Adapter main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GH_REPO/branches/master" > "$RUNNER_TEMP/host-master.json"
+          gh api "repos/$GH_REPO/branches/feature/native-browser-tabs" > "$RUNNER_TEMP/host-integration.json"
+          gh api "repos/TonyPythoneer/herdr-webview-adapter/branches/main" > "$RUNNER_TEMP/adapter-main.json"
+          python3 release-tool/scripts/webview_branch_protection.py \
+            --host-master "$RUNNER_TEMP/host-master.json" \
+            --host-integration "$RUNNER_TEMP/host-integration.json" \
+            --adapter-main "$RUNNER_TEMP/adapter-main.json"
       - name: Attest CI and real native E2E workflows against trusted default branch
         run: |
           python3 release-tool/scripts/webview_workflow_attestation.py \
@@ -133,6 +146,13 @@ jobs:
           SHA: ${{ steps.sha.outputs.sha }}
         run: |
           set -euo pipefail
+          # A newer feature push must not race an older passing CI workflow
+          # into publishing the wrong commit.
+          current="$(gh api "repos/$GH_REPO/branches/feature/native-browser-tabs" --jq '.commit.sha')"
+          [[ "$current" == "$SHA" ]] || {
+            echo "::error::Release branch moved after validation; refusing stale SHA"
+            exit 1
+          }
           tag="v$VERSION"
           # Missing items are allowed only on genuine GitHub HTTP 404.
           # Any API/permission/network failure must block publishing.

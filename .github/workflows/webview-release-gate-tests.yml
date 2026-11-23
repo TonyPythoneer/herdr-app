@@ -9,6 +9,8 @@ on:
       - scripts/test_webview_release_identity.py
       - scripts/webview_workflow_attestation.py
       - scripts/test_webview_workflow_attestation.py
+      - scripts/webview_branch_protection.py
+      - scripts/test_webview_branch_protection.py
       - .github/workflows/browser-macos.yml
       - .github/workflows/ci.yml
       - .github/workflows/webview-auto-release.yml
@@ -31,6 +33,7 @@ jobs:
           python3 -m unittest discover -s scripts -p 'test_webview_release_gate.py' -v
           python3 -m unittest discover -s scripts -p 'test_webview_release_identity.py' -v
           python3 -m unittest discover -s scripts -p 'test_webview_workflow_attestation.py' -v
+          python3 -m unittest discover -s scripts -p 'test_webview_branch_protection.py' -v
       - name: Checkout tested integration branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

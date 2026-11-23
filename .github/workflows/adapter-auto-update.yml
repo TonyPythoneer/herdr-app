@@ -34,6 +34,20 @@ jobs:
           ref: feature/native-browser-tabs
           persist-credentials: false
           fetch-depth: 0
+      - name: Require protected update source and integration destinations
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api "repos/$GH_REPO/branches/master" > "$RUNNER_TEMP/host-master.json"
+          gh api "repos/$GH_REPO/branches/feature/native-browser-tabs" > "$RUNNER_TEMP/host-integration.json"
+          gh api "repos/TonyPythoneer/herdr-webview-adapter/branches/main" > "$RUNNER_TEMP/adapter-main.json"
+          python3 automation/scripts/webview_branch_protection.py \
+            --host-master "$RUNNER_TEMP/host-master.json" \
+            --host-integration "$RUNNER_TEMP/host-integration.json" \
+            --adapter-main "$RUNNER_TEMP/adapter-main.json"
       - name: Detect new Adapter main, validate exact CI and runtime diff
         id: detect
         working-directory: integration
