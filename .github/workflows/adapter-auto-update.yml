@@ -1,0 +1,116 @@
+name: adapter-auto-update
+
+on:
+  schedule:
+    - cron: '19 5 * * 1' # Monday 13:19 Taiwan, after Adapter compatibility scan
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+  checks: read
+
+concurrency:
+  group: adapter-auto-update-maintained-feature
+  cancel-in-progress: false
+
+jobs:
+  propose:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout default-branch automation sources
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: automation
+          persist-credentials: false
+      - name: Check updater regression tests
+        run: python3 -m unittest discover -s automation/scripts -p 'test_adapter_update.py' -v
+      - name: Checkout maintained browser integration
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: integration
+          ref: feature/native-browser-tabs
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Detect new Adapter main, validate exact CI and runtime diff
+        id: detect
+        working-directory: integration
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tool="../automation/scripts/adapter_update.py"
+          old="$(python3 "$tool" pin Cargo.toml)"
+          new="$(git ls-remote https://github.com/TonyPythoneer/herdr-webview-adapter.git refs/heads/main | awk '{print $1}')"
+          [[ "$new" =~ ^[a-f0-9]{40}$ ]] || { echo 'Invalid Adapter main SHA'; exit 1; }
+          if [[ "$new" == "$old" ]]; then echo 'Already pinned to Adapter main'; exit 0; fi
+          gh api "repos/TonyPythoneer/herdr-webview-adapter/commits/$new/check-runs?per_page=100" > "$RUNNER_TEMP/adapter-checks.json"
+          python3 "$tool" checks "$RUNNER_TEMP/adapter-checks.json"
+          gh api "repos/TonyPythoneer/herdr-webview-adapter/compare/$old...$new" > "$RUNNER_TEMP/adapter-compare.json"
+          rc=0; python3 "$tool" changes "$RUNNER_TEMP/adapter-compare.json" || rc=$?
+          if [[ "$rc" == 2 ]]; then echo 'Only Adapter documentation/automation changed'; exit 0; fi
+          [[ "$rc" == 0 ]] || exit "$rc"
+          branch="automation/update-adapter-${new:0:12}"
+          if [[ -n "$(git ls-remote --heads origin "refs/heads/$branch")" ]]; then echo 'Update PR already proposed'; exit 0; fi
+          echo "new=$new" >> "$GITHUB_OUTPUT"
+          echo "old=$old" >> "$GITHUB_OUTPUT"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+      - name: Install toolchains and notices generator
+        if: steps.detect.outputs.new != ''
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: 1.95.0
+      - name: Install Bun
+        if: steps.detect.outputs.new != ''
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.4'
+      - name: Install pinned cargo-about to regenerate licenses
+        if: steps.detect.outputs.new != ''
+        run: cargo install cargo-about --version 0.9.3 --locked
+      - name: Prepare Adapter upgrade with NO GitHub write credentials
+        if: steps.detect.outputs.new != ''
+        working-directory: integration
+        env:
+          NEW_SHA: ${{ steps.detect.outputs.new }}
+          BOT_BRANCH: ${{ steps.detect.outputs.branch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git checkout -b "$BOT_BRANCH"
+          tool="../automation/scripts/adapter_update.py"
+          python3 "$tool" apply Cargo.toml "$NEW_SHA"
+          cargo update --package herdr-webview-adapter
+          cargo metadata --locked --format-version 1 > /dev/null
+          python3 "$tool" lock Cargo.lock "$NEW_SHA"
+          bun scripts/notices.ts
+          git add Cargo.toml Cargo.lock THIRD-PARTY-NOTICES
+          git diff --cached --check
+          git diff --cached --quiet && { echo 'No staged Adapter upgrade'; exit 1; }
+          git commit -m "chore(adapter): pin tested Adapter $NEW_SHA and bump WebView version"
+      - name: Publish isolated PR and dispatch exact candidate CI
+        if: steps.detect.outputs.new != ''
+        working-directory: integration
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          NEW_SHA: ${{ steps.detect.outputs.new }}
+          OLD_SHA: ${{ steps.detect.outputs.old }}
+          BOT_BRANCH: ${{ steps.detect.outputs.branch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh auth setup-git
+          git push origin "HEAD:refs/heads/$BOT_BRANCH"
+          gh pr create -R "$GH_REPO" -B feature/native-browser-tabs -H "$BOT_BRANCH" \
+            -t "chore(adapter): update pinned Adapter to ${NEW_SHA:0:12}" \
+            -b "Adapter $OLD_SHA -> $NEW_SHA has passed its Linux/macOS main-branch CI. This bot updates Cargo.toml, Cargo.lock, THIRD-PARTY-NOTICES and bumps the WebView build version. Full Host Linux/Windows/macOS CI, shipped WKWebView/Chrome CDP, real GPUI approval E2E and release gate are mandatory. No direct push to the integration branch, no self-merge and no release bypass. Incompatible updates remain PRs for review."
+          # GITHUB_TOKEN PR events do not trigger Actions automatically.
+          gh workflow run ci.yml -R "$GH_REPO" --ref "$BOT_BRANCH"
+          gh workflow run browser-macos.yml -R "$GH_REPO" --ref "$BOT_BRANCH"

@@ -1,0 +1,21 @@
+name: adapter-auto-update-tests
+on:
+  pull_request:
+    paths:
+      - scripts/adapter_update.py
+      - scripts/test_adapter_update.py
+      - .github/workflows/adapter-auto-update.yml
+      - .github/workflows/adapter-auto-update-tests.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  updater-contract-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Test SHA pinning, versioning, checked source and fail-closed CI
+        run: python3 -m unittest discover -s scripts -p 'test_adapter_update.py' -v
