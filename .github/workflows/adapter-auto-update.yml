@@ -44,6 +44,14 @@ jobs:
         run: |
           set -euo pipefail
           tool="../automation/scripts/adapter_update.py"
+          # The default-branch dispatcher and the feature-branch workflow
+          # must be byte-for-byte identical before running a bot candidate.
+          default_browser="$(gh api "repos/$GH_REPO/contents/.github/workflows/browser-macos.yml?ref=master" --jq .sha)"
+          feature_browser="$(gh api "repos/$GH_REPO/contents/.github/workflows/browser-macos.yml?ref=feature/native-browser-tabs" --jq .sha)"
+          [[ "$default_browser" == "$feature_browser" ]] || {
+            echo "::error::Browser E2E workflow differs between default and integration branches; sync the workflow first"
+            exit 1
+          }
           old="$(python3 "$tool" pin Cargo.toml)"
           new="$(git ls-remote https://github.com/TonyPythoneer/herdr-webview-adapter.git refs/heads/main | awk '{print $1}')"
           [[ "$new" =~ ^[a-f0-9]{40}$ ]] || { echo 'Invalid Adapter main SHA'; exit 1; }

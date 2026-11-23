@@ -59,14 +59,37 @@ def runtime_changes(compare):
     files = compare.get("files")
     if not isinstance(files, list) or len(files) >= 300:
         raise ValueError("missing or truncated GitHub compare results; manual review required")
-    return any(file.get("filename", "").startswith(("src/", "assets/")) or
-               file.get("filename") in ("Cargo.toml", "Cargo.lock")
-               for file in files)
+    # Only explicitly non-runtime files can be skipped. Unknown paths,
+    # build.rs, tests, new build hooks and contract docs REQUIRE Host E2E.
+    harmless = {"README.md", "LICENSE", ".github/dependabot.yml",
+                ".github/upstream-compat.json", "scripts/upstream_compat.py",
+                "scripts/test_upstream_compat.py"}
+    for file in files:
+        path = file.get("filename")
+        if not isinstance(path, str):
+            raise ValueError("missing Adapter changed-file path")
+        if path in harmless or path.startswith(".github/workflows/"):
+            continue
+        if path.startswith("docs/") and path != "docs/OWNERSHIP.md":
+            continue
+        return True
+    return False
 
 
 def lock_valid(lock, sha):
-    expected = ("git+" + URL + "?rev=" + sha + "#" + sha)
-    return expected in lock
+    if re.fullmatch(r"[a-f0-9]{40}", sha) is None:
+        return False
+    expected = "git+" + URL + "?rev=" + sha + "#" + sha
+    matched = []
+    for section in lock.split("[[package]]")[1:]:
+        fields = {}
+        for line in section.splitlines():
+            match = re.fullmatch(r'(name|source) = "([^"]*)"', line.strip())
+            if match:
+                fields[match.group(1)] = match.group(2)
+        if fields.get("name") == "herdr-webview-adapter":
+            matched.append(fields.get("source"))
+    return matched == [expected]
 
 
 def main():
