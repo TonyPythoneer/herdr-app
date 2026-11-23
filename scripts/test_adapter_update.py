@@ -36,6 +36,18 @@ class AdapterUpdateTests(unittest.TestCase):
             {"filename": "README.md"}, {"filename": ".github/workflows/ci.yml"}]}))
         self.assertTrue(runtime_changes({"status": "ahead", "files": [
             {"filename": "src/browser.rs"}]}))
+        # Unknown/new build hooks, tests and integration contract docs must
+        # never be silently treated as documentation-only changes.
+        for name in ("build.rs", "tests/native.rs", ".cargo/config.toml",
+                     "docs/OWNERSHIP.md", "ci/new_hook.sh"):
+            self.assertTrue(runtime_changes({"status": "ahead", "files": [
+                {"filename": name}]}), name)
+        self.assertFalse(runtime_changes({"status": "ahead", "files": [
+            {"filename": ".github/upstream-compat.json"},
+            {"filename": "scripts/upstream_compat.py"},
+            {"filename": "docs/README.md"}]}))
+        with self.assertRaisesRegex(ValueError, "path"):
+            runtime_changes({"status": "ahead", "files": [{}]})
         with self.assertRaises(ValueError):
             runtime_changes({"status": "diverged", "files": []})
         with self.assertRaises(ValueError):
@@ -43,8 +55,12 @@ class AdapterUpdateTests(unittest.TestCase):
 
     def test_lockfile_must_match_exact_revision(self):
         expected = "git+" + URL + "?rev=" + SHA_B + "#" + SHA_B
-        self.assertTrue(lock_valid("source = \"" + expected + "\"\n", SHA_B))
-        self.assertFalse(lock_valid("source = \"" + expected + "\"\n", SHA_A))
+        self.assertFalse(lock_valid('[[package]]\nname = "other"\nsource = "' + expected + '"\n', SHA_B))
+        valid = '[[package]]\nname = "herdr-webview-adapter"\nsource = "' + expected + '"\n'
+        self.assertTrue(lock_valid(valid, SHA_B))
+        self.assertFalse(lock_valid(valid + valid, SHA_B))
+        self.assertFalse(lock_valid(valid.replace(SHA_B, SHA_A), SHA_B))
+        self.assertFalse(lock_valid(valid, "not-a-sha"))
 
 
 if __name__ == "__main__":

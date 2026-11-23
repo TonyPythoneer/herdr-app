@@ -34,6 +34,20 @@ jobs:
           ref: feature/native-browser-tabs
           persist-credentials: false
           fetch-depth: 0
+      - name: Require protected update source and integration destinations
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api "repos/$GH_REPO/branches/master" > "$RUNNER_TEMP/host-master.json"
+          gh api "repos/$GH_REPO/branches/feature/native-browser-tabs" > "$RUNNER_TEMP/host-integration.json"
+          gh api "repos/TonyPythoneer/herdr-webview-adapter/branches/main" > "$RUNNER_TEMP/adapter-main.json"
+          python3 automation/scripts/webview_branch_protection.py \
+            --host-master "$RUNNER_TEMP/host-master.json" \
+            --host-integration "$RUNNER_TEMP/host-integration.json" \
+            --adapter-main "$RUNNER_TEMP/adapter-main.json"
       - name: Detect new Adapter main, validate exact CI and runtime diff
         id: detect
         working-directory: integration
@@ -44,6 +58,14 @@ jobs:
         run: |
           set -euo pipefail
           tool="../automation/scripts/adapter_update.py"
+          # The default-branch dispatcher and the feature-branch workflow
+          # must be byte-for-byte identical before running a bot candidate.
+          default_browser="$(gh api "repos/$GH_REPO/contents/.github/workflows/browser-macos.yml?ref=master" --jq .sha)"
+          feature_browser="$(gh api "repos/$GH_REPO/contents/.github/workflows/browser-macos.yml?ref=feature/native-browser-tabs" --jq .sha)"
+          [[ "$default_browser" == "$feature_browser" ]] || {
+            echo "::error::Browser E2E workflow differs between default and integration branches; sync the workflow first"
+            exit 1
+          }
           old="$(python3 "$tool" pin Cargo.toml)"
           new="$(git ls-remote https://github.com/TonyPythoneer/herdr-webview-adapter.git refs/heads/main | awk '{print $1}')"
           [[ "$new" =~ ^[a-f0-9]{40}$ ]] || { echo 'Invalid Adapter main SHA'; exit 1; }
