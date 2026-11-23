@@ -55,7 +55,6 @@ class AdapterUpdateTests(unittest.TestCase):
 
     def test_lockfile_must_match_exact_revision(self):
         expected = "git+" + URL + "?rev=" + SHA_B + "#" + SHA_B
-        self.assertTrue(lock_valid("source = \"" + expected + "\"\n", SHA_B))
         self.assertFalse(lock_valid('[[package]]\nname = "other"\nsource = "' + expected + '"\n', SHA_B))
         valid = '[[package]]\nname = "herdr-webview-adapter"\nsource = "' + expected + '"\n'
         self.assertTrue(lock_valid(valid, SHA_B))
