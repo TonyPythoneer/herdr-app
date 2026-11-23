@@ -9,7 +9,10 @@ class WorkflowWiringTests(unittest.TestCase):
         for name in ("ci.yml", "browser-macos.yml"):
             text = (ROOT / ".github" / "workflows" / name).read_text()
             self.assertIn("  workflow_dispatch:", text, name)
-            self.assertIn("feature/native-browser-tabs", text, name)
+            if name == "browser-macos.yml":
+                self.assertIn("feature/native-browser-tabs", text, name)
+            else:
+                self.assertIn("branches: [master]", text, name)
 
     def test_bot_calls_both_host_checks(self):
         text = (ROOT / ".github/workflows/adapter-auto-update.yml").read_text()
