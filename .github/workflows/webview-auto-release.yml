@@ -127,13 +127,34 @@ jobs:
         run: |
           set -euo pipefail
           tag="v$VERSION"
-          if gh release view "$tag" -R "$GH_REPO" >/dev/null 2>&1; then
-            is_draft="$(gh release view "$tag" -R "$GH_REPO" --json isDraft --jq .isDraft)"
-            if [[ "$is_draft" != true ]]; then
-              echo "Existing published release $tag; no overwrite or duplicate"
-              exit 0
+          # Missing items are allowed only on genuine GitHub HTTP 404.
+          # Any API/permission/network failure must block publishing.
+          for kind in release tag; do
+            json="$RUNNER_TEMP/existing-$kind.json"
+            err="$RUNNER_TEMP/existing-$kind.err"
+            if [[ "$kind" == release ]]; then
+              endpoint="repos/$GH_REPO/releases/tags/$tag"
+            else
+              endpoint="repos/$GH_REPO/git/ref/tags/$tag"
             fi
-          else
+            if gh api "$endpoint" > "$json" 2> "$err"; then
+              :
+            elif grep -q '(HTTP 404)' "$err"; then
+              printf 'null\n' > "$json"
+            else
+              cat "$err" >&2
+              exit 1
+            fi
+          done
+          outcome="$(python3 scripts/webview_release_identity.py \
+            --sha "$SHA" --tag "$tag" \
+            --release-json "$RUNNER_TEMP/existing-release.json" \
+            --tag-json "$RUNNER_TEMP/existing-tag.json")"
+          if [[ "$outcome" == already-published ]]; then
+            echo "Existing published release $tag already belongs to $SHA; no overwrite"
+            exit 0
+          fi
+          if [[ "$(cat "$RUNNER_TEMP/existing-release.json")" == null ]]; then
             gh release create "$tag" -R "$GH_REPO" --target "$SHA" --draft \
               --title "Herdr WebView $VERSION" \
               --notes "Stable, verified Herdr WebView for macOS Apple Silicon."

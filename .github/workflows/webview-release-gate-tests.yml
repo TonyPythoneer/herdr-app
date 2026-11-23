@@ -5,6 +5,8 @@ on:
     paths:
       - scripts/webview_release_gate.py
       - scripts/test_webview_release_gate.py
+      - scripts/webview_release_identity.py
+      - scripts/test_webview_release_identity.py
       - .github/workflows/webview-auto-release.yml
       - .github/workflows/webview-release-gate-tests.yml
   workflow_dispatch:
@@ -21,4 +23,6 @@ jobs:
         with:
           persist-credentials: false
       - name: Verify fail-closed rules and CI result precedence
-        run: python3 -m unittest discover -s scripts -p 'test_webview_release_gate.py' -v
+        run: |
+          python3 -m unittest discover -s scripts -p 'test_webview_release_gate.py' -v
+          python3 -m unittest discover -s scripts -p 'test_webview_release_identity.py' -v

@@ -6,6 +6,8 @@ on:
       - scripts/test_adapter_update.py
       - .github/workflows/adapter-auto-update.yml
       - .github/workflows/adapter-auto-update-tests.yml
+      - .github/workflows/browser-macos.yml
+      - scripts/test_adapter_pipeline_contract.py
   workflow_dispatch:
 permissions:
   contents: read
@@ -18,4 +20,6 @@ jobs:
         with:
           persist-credentials: false
       - name: Test SHA pinning, versioning, checked source and fail-closed CI
-        run: python3 -m unittest discover -s scripts -p 'test_adapter_update.py' -v
+        run: |
+          python3 -m unittest discover -s scripts -p 'test_adapter_update.py' -v
+          python3 -m unittest discover -s scripts -p 'test_adapter_pipeline_contract.py' -v
