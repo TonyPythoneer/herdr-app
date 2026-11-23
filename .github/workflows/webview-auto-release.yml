@@ -62,6 +62,13 @@ jobs:
           ref: ${{ steps.sha.outputs.sha }}
           path: integration
           persist-credentials: false
+      - name: Attest CI and real native E2E workflows against trusted default branch
+        run: |
+          python3 release-tool/scripts/webview_workflow_attestation.py \
+            --trusted-ci release-tool/.github/workflows/ci.yml \
+            --tested-ci integration/.github/workflows/ci.yml \
+            --trusted-browser release-tool/.github/workflows/browser-macos.yml \
+            --tested-browser integration/.github/workflows/browser-macos.yml
       - name: Check release prerequisites at this exact SHA
         id: gate
         env:

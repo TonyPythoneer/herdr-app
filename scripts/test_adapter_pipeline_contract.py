@@ -23,6 +23,7 @@ class WorkflowWiringTests(unittest.TestCase):
     def test_release_guard_cannot_be_bypassed_by_existing_tag(self):
         text = (ROOT / ".github/workflows/webview-auto-release.yml").read_text()
         self.assertIn("scripts/webview_release_identity.py", text)
+        self.assertIn("scripts/webview_workflow_attestation.py", text)
         self.assertIn('if [[ "$outcome" == already-published ]]; then', text)
 
 

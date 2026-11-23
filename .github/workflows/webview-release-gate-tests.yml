@@ -7,6 +7,10 @@ on:
       - scripts/test_webview_release_gate.py
       - scripts/webview_release_identity.py
       - scripts/test_webview_release_identity.py
+      - scripts/webview_workflow_attestation.py
+      - scripts/test_webview_workflow_attestation.py
+      - .github/workflows/browser-macos.yml
+      - .github/workflows/ci.yml
       - .github/workflows/webview-auto-release.yml
       - .github/workflows/webview-release-gate-tests.yml
   workflow_dispatch:
@@ -26,3 +30,17 @@ jobs:
         run: |
           python3 -m unittest discover -s scripts -p 'test_webview_release_gate.py' -v
           python3 -m unittest discover -s scripts -p 'test_webview_release_identity.py' -v
+          python3 -m unittest discover -s scripts -p 'test_webview_workflow_attestation.py' -v
+      - name: Checkout tested integration branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: feature/native-browser-tabs
+          path: maintained-integration
+          persist-credentials: false
+      - name: Verify actual trusted platform/native E2E parity
+        run: |
+          python3 scripts/webview_workflow_attestation.py \
+            --trusted-ci .github/workflows/ci.yml \
+            --tested-ci maintained-integration/.github/workflows/ci.yml \
+            --trusted-browser .github/workflows/browser-macos.yml \
+            --tested-browser maintained-integration/.github/workflows/browser-macos.yml
