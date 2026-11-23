@@ -32,7 +32,7 @@ jobs:
         with:
           path: integration
           ref: feature/native-browser-tabs
-          persist-credentials: true
+          persist-credentials: false
           fetch-depth: 0
       - name: Detect new Adapter main, validate exact CI and runtime diff
         id: detect
@@ -72,14 +72,11 @@ jobs:
       - name: Install pinned cargo-about to regenerate licenses
         if: steps.detect.outputs.new != ''
         run: cargo install cargo-about --version 0.9.3 --locked
-      - name: Update lockfile, notices and WebView version, then open tested PR
+      - name: Prepare Adapter upgrade with NO GitHub write credentials
         if: steps.detect.outputs.new != ''
         working-directory: integration
         env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
           NEW_SHA: ${{ steps.detect.outputs.new }}
-          OLD_SHA: ${{ steps.detect.outputs.old }}
           BOT_BRANCH: ${{ steps.detect.outputs.branch }}
         shell: bash
         run: |
@@ -97,6 +94,19 @@ jobs:
           git diff --cached --check
           git diff --cached --quiet && { echo 'No staged Adapter upgrade'; exit 1; }
           git commit -m "chore(adapter): pin tested Adapter $NEW_SHA and bump WebView version"
+      - name: Publish isolated PR and dispatch exact candidate CI
+        if: steps.detect.outputs.new != ''
+        working-directory: integration
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          NEW_SHA: ${{ steps.detect.outputs.new }}
+          OLD_SHA: ${{ steps.detect.outputs.old }}
+          BOT_BRANCH: ${{ steps.detect.outputs.branch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh auth setup-git
           git push origin "HEAD:refs/heads/$BOT_BRANCH"
           gh pr create -R "$GH_REPO" -B feature/native-browser-tabs -H "$BOT_BRANCH" \
             -t "chore(adapter): update pinned Adapter to ${NEW_SHA:0:12}" \
