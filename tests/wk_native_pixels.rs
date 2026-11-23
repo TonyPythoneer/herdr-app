@@ -3,21 +3,12 @@
 
 // Import the very same production snapshot code into the standalone E2E
 // binary, while providing an isolated screenshot directory.
-#[cfg(target_os = "macos")]
-mod mods {
-    use std::path::PathBuf;
-    pub fn app_dir() -> PathBuf {
-        std::env::temp_dir().join(format!("herdr-webview-wk-smoke-{}",std::process::id()))
-    }
-}
-#[cfg(target_os = "macos")]
-#[path = "../src/wk_native.rs"]
-mod wk_native;
+#[cfg(target_os="macos")]
+use herdr_webview_adapter::{app_home as mods, wk_native};
 
 #[cfg(target_os = "macos")]
 mod mac {
     use gpui::{prelude::*, *};
-    use raw_window_handle::HasWindowHandle;
     use std::{io::{Read, Write}, net::TcpListener, path::PathBuf,
         sync::mpsc, time::Duration};
 
@@ -102,6 +93,7 @@ mod mac {
     }
 
     pub fn run() {
+        assert!(std::env::var_os("HERDR_APP_HOME").is_some(), "native screenshot E2E must set an isolated HERDR_APP_HOME");
         let (url, server)=fixture();
         let (report_tx,report_rx)=mpsc::channel();
         gpui_platform::application().run(move |cx| {
@@ -112,7 +104,7 @@ mod mac {
                 show:true,focus:true,titlebar:None,
                 ..Default::default()
             },|win,cx|{
-                let parent=win.window_handle().expect("native GPUI window handle");
+                let parent=raw_window_handle::HasWindowHandle::window_handle(win).expect("native GPUI window handle");
                 let native=wry::WebViewBuilder::new().with_url(&url)
                     .build_as_child(&parent).expect("real WKWebView child");
                 let web=cx.new(|cx|gpui_wry::WebView::new(native,win,cx));

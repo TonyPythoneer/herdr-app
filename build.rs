@@ -29,6 +29,13 @@ fn embed(base: &Path, folder: &str, name: &str, file: &str) {
     let mut lines = Vec::new();
     let root = base.join(folder);
     walk(&root, base, &root, &mut lines);
+    if name == "DEFAULT_MODS" {
+        // Browser UI is now versioned in the Adapter crate. Do not compile
+        // the fork's stale local JS copy if one remains after an upgrade.
+        lines.retain(|line| !line.contains("browser-url/"));
+        lines.push("    (\"browser-url/main.js\", herdr_webview_adapter::assets::BROWSER_URL_JS.as_bytes()),".to_owned());
+        lines.push("    (\"browser-url/mod.json\", herdr_webview_adapter::assets::BROWSER_URL_MOD_JSON.as_bytes()),".to_owned());
+    }
     let code = format!("pub const {name}: &[(&str, &[u8])] = &[\n{}\n];\n", lines.join("\n"));
     std::fs::write(Path::new(&std::env::var("OUT_DIR").unwrap()).join(file), code).unwrap();
 }
